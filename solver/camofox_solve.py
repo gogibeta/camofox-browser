@@ -25,6 +25,9 @@ from uuid import uuid4
 
 DEFAULT_CAMOFOX = "http://127.0.0.1:9377"
 USER_ID = "turnstile-solver"
+# Click at most this many times per solve. A widget that has not accepted a click
+# by then is not going to; more clicks only add noise to the challenge.
+MAX_CLICK_ATTEMPTS = 4
 
 # NOTE: camofox evaluate() takes a JS *expression* string, so these must be
 # immediately-invoked function expressions (IIFEs), not bare arrow functions.
@@ -205,6 +208,7 @@ def solve(cfg: dict) -> dict:
     popup_closed = 0
     clicked = False
     next_click_at = 0.0
+    click_attempts = 0
     tab = None
     error = None
 
@@ -227,8 +231,9 @@ def solve(cfg: dict) -> dict:
             if token:
                 break
 
-            if time.monotonic() >= next_click_at:
-                next_click_at = time.monotonic() + 1.5
+            if click_attempts < MAX_CLICK_ATTEMPTS and time.monotonic() >= next_click_at:
+                next_click_at = time.monotonic() + 4.0
+                click_attempts += 1
                 try:
                     camofox.evaluate(tab, WIDGET_SCROLL_JS, timeout=5)
                 except Exception:
