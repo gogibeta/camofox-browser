@@ -28,13 +28,19 @@ the `ipv4fix` plugin, stages the extension and solvers into `/data/workspace`,
 compiles the Rust solver when `rustc` is present, and starts a headed browser on
 `DISPLAY=:1` bound to `127.0.0.1:9377`. Wait for `HEALTH OK`.
 
+`turnstile/vm_setup_camofox.sh` does the same thing from a VM that already has
+the old stack, and clones **this fork** (override with `CAMOFOX_REPO_URL` /
+`CAMOFOX_REPO_BRANCH`). It fails loudly if the checkout has no `solver/` or
+`extension/`, because a browser without the kit cannot auto-solve.
+
 Install only, without starting the server:
 
 ```bash
 bash turnstile/install.sh --no-start
 ```
 
-Re-running is safe; it is idempotent.
+Re-running is safe; it is idempotent, and it re-stages the solver so a re-install
+never keeps an old copy running.
 
 ## Solve from the command line
 
@@ -52,6 +58,27 @@ One JSON line comes back:
  "method":"camofox-browser","popupClosed":0,"clicked":true,"url":"..."}
 ```
 
+## Which engine runs by default
+
+**The extension runs the Python solver.** `extension/background.js` defaults to
+`solverPath: /data/workspace/camofox_solve.py` with
+`solverPython: /data/workspace/camoufox-venv/bin/python`, and the popup exposes
+both fields if you want to change them.
+
+The Rust solver is installed alongside it at `/data/workspace/camofox_solve_rust`
+and is faster (~8.4s vs ~9.5s in the measurements below), but it is **opt-in**:
+set `solverPath` to `/data/workspace/camofox_solve_rust` and clear `solverPython`
+in the extension popup. The installer always compiles it when `rustc` is present,
+so switching is a config change, not a reinstall.
+
+| Engine | Path | Default for | Typical wall |
+| --- | --- | --- | --- |
+| Python | `camofox_solve.py` | the extension | 9.4–9.6 s |
+| Rust | `camofox_solve_rust` | command line / opt-in | 8.3–8.9 s |
+
+Both drive the same camofox-browser HTTP API on `127.0.0.1:9377`; neither talks
+to Apify.
+
 ## How the click works (the part that took the longest)
 
 Turnstile mounts its challenge iframe inside a **closed shadow root**, so
@@ -67,6 +94,11 @@ live. The solver therefore targets the widget's light-DOM host element:
 3. Wait ~400 ms, measure again, then click `left + 30`, vertical centre — the
    checkbox, not the label text.
 4. Poll `input[name=cf-turnstile-response]` until it has a value.
+
+The click is retried up to 4 times, 4 s apart. A cold browser has no clickable
+widget iframe for the first second or two, so a single attempt was too few; but
+clicking for the whole timeout adds stray clicks to a challenge that is already
+solving.
 
 Clicking the host by CSS selector instead would click its **centre**, which is
 the label. That passes on some sites and silently fails on others.
