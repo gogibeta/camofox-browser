@@ -120,20 +120,28 @@ export function register(_app, ctx) {
 JS
 fi
 
-echo "[6/8] staging the solver and extension"
-# The browser is useless for auto-solving without these, and a re-install must
-# refresh them: a stale /data/workspace/camofox_solve.py from an earlier build
-# silently keeps running the old click-once logic.
+echo "[6/8] staging the extension and building the Rust solver"
+# One engine only. The Rust binary is the single solver: no interpreter to keep
+# in sync, and it is ~1s faster per solve. The Python solver is still in the repo
+# for reference, but it is deliberately not installed.
 mkdir -p "$WS/turnstile-ext"
 cp -f "$REPO"/extension/* "$WS/turnstile-ext/" 2>/dev/null || true
-cp -f "$REPO/solver/camofox_solve.py" "$WS/camofox_solve.py"
-cp -f "$REPO/solver/camofox_solve.py" "$WS/instabox_solver.py"
-if command -v rustc >/dev/null 2>&1 && [ -f "$REPO/solver/camofox_solve.rs" ]; then
-  echo "    compiling the Rust solver"
-  rustc --edition 2021 -O "$REPO/solver/camofox_solve.rs" -o "$WS/camofox_solve_rust" 2>&1 \
-    | grep -E '^error' || true
+
+if ! command -v rustc >/dev/null 2>&1; then
+  echo "ERROR: rustc is required to build the solver and is not installed." >&2
+  echo "       Install it with: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y" >&2
+  exit 1
 fi
-ls -la "$WS/camofox_solve.py" "$WS/camofox_solve_rust" 2>/dev/null | sed 's/^/    /'
+echo "    compiling camofox_solve.rs"
+if ! rustc --edition 2021 -O "$REPO/solver/camofox_solve.rs" -o "$WS/camofox_solve_rust"; then
+  echo "ERROR: the Rust solver failed to compile; not starting a browser that cannot solve." >&2
+  exit 1
+fi
+chmod +x "$WS/camofox_solve_rust"
+# Remove the Python solver left by an earlier install so nothing can silently
+# run the old engine.
+rm -f "$WS/camofox_solve.py" "$WS/instabox_solver.py"
+ls -la "$WS/camofox_solve_rust" | sed 's/^/    /'
 
 echo "[7/8] starting server on :9377 (headed, DISPLAY=:1)"
 nohup env DISPLAY=:1 NODE_ENV=development CAMOFOX_PORT=9377 \

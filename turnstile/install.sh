@@ -76,17 +76,24 @@ if [ -f "$REPO/turnstile/plugins/ipv4fix.js" ]; then
   cp "$REPO/turnstile/plugins/ipv4fix.js" "$REPO/plugins/ipv4fix/index.js"
 fi
 
-echo "==> [6/8] installing the solver"
+echo "==> [6/8] installing the extension and building the Rust solver"
+# One engine only: the Rust binary. No interpreter to keep in sync, ~1s faster.
+# The Python solver stays in the repo for reference but is not installed.
 mkdir -p "$WS/turnstile-ext"
 cp -f "$REPO"/extension/* "$WS/turnstile-ext/" 2>/dev/null || true
-cp -f "$REPO/solver/camofox_solve.py" "$WS/camofox_solve.py"
-# The Actor's instabox engine expects this name.
-cp -f "$REPO/solver/camofox_solve.py" "$WS/instabox_solver.py"
 
-if command -v rustc >/dev/null 2>&1 && [ -f "$REPO/solver/camofox_solve.rs" ]; then
-  echo "    compiling the Rust solver"
-  rustc --edition 2021 -O "$REPO/solver/camofox_solve.rs" -o "$WS/camofox_solve_rust" 2>&1 | grep -E '^error' || true
+if ! command -v rustc >/dev/null 2>&1; then
+  echo "rustc is required to build the solver and was not found." >&2
+  echo "Install it with: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y" >&2
+  exit 1
 fi
+echo "    compiling camofox_solve.rs"
+if ! rustc --edition 2021 -O "$REPO/solver/camofox_solve.rs" -o "$WS/camofox_solve_rust"; then
+  echo "the Rust solver failed to compile; refusing to start a browser that cannot solve." >&2
+  exit 1
+fi
+chmod +x "$WS/camofox_solve_rust"
+rm -f "$WS/camofox_solve.py" "$WS/instabox_solver.py"
 
 echo "==> [7/8] stopping any previous server"
 pkill -f "node server.js" 2>/dev/null || true

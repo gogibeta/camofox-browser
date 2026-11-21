@@ -24,6 +24,13 @@
   <label>InstaBox API URL</label>
   <input id="iburl" type="text">
 
+  <label>Solver path (on the VM)</label>
+  <input id="solverpath" type="text" placeholder="/data/workspace/camofox_solve_rust">
+  <div class="small">The Rust solver is installed by default. Leave the interpreter
+    field empty for a compiled binary.</div>
+  <label>Interpreter (optional)</label>
+  <input id="solverpython" type="text" placeholder="empty for the Rust binary">
+
   <label><input id="auto" type="checkbox"> Auto-solve on page open</label>
   <button id="save">Save</button>
   <button id="solve">Solve this tab</button>

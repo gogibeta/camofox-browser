@@ -8,8 +8,8 @@ const DEFAULTS = {
   instaboxApiKey: '',
   instaboxMachineId: 'm_agq7thurpy4svui43m5r735hri',
   instaboxApiUrl: 'https://api.instabox.sh/v1',
-  solverPath: '/data/workspace/camofox_solve.py',
-  solverPython: '/data/workspace/camofox-venv/bin/python',
+  solverPath: '/data/workspace/camofox_solve_rust',
+  solverPython: '',
   camofoxUrl: 'http://127.0.0.1:9377',
   timeoutMs: 45000,
   autoSolve: true,
@@ -57,8 +57,13 @@ async function solveOnInstabox(info, cfg) {
     camofoxUrl: cfg.camofoxUrl || 'http://127.0.0.1:9377',
   };
   const arg = b64(JSON.stringify(payload));
+  // solverPython is optional: it is the interpreter for a .py solver. A compiled
+  // binary (the Rust solver) must be executed directly, so an empty value has to
+  // produce `path arg`, not a leading space that the shell still tolerates but
+  // that would break the moment solverPath is quoted.
+  const runner = (cfg.solverPython || '').trim();
   const cmd =
-    `cd /data/workspace && ${cfg.solverPython} ${cfg.solverPath} ${arg}`;
+    `cd /data/workspace && ${runner ? `${runner} ` : ''}${cfg.solverPath} ${arg}`;
 
   const endpoint = `${cfg.instaboxApiUrl}/machines/${encodeURIComponent(cfg.instaboxMachineId)}/exec`;
   const response = await fetch(endpoint, {
