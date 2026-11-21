@@ -8,8 +8,8 @@ No third-party captcha API, no Apify dependency for the extension path.
 | Path | What it is |
 | --- | --- |
 | `turnstile/install.sh` | One-shot installer: deps, config, plugins, solver, headed server |
-| `solver/camofox_solve.py` | Python solver driving the camofox HTTP API |
-| `solver/camofox_solve.rs` | Same solver in std-only Rust (fastest wall time) |
+| `solver/camofox_solve.rs` | The solver: std-only Rust, compiled on install |
+| `solver/camofox_solve.py` | Same solver in Python, kept as a readable reference (not installed) |
 | `extension/` | Chrome MV3 + Firefox MV2 auto-solve extension |
 | `turnstile/plugins/ipv4fix.js` | Forces IPv4 DNS + relaxes tracking protection |
 | `turnstile/deploy_instabox.py` | Upload the kit to an InstaBox VM over its exec API |
@@ -47,8 +47,7 @@ never keeps an old copy running.
 ```bash
 CFG='{"url":"https://demo.turnstile.workers.dev/","timeoutMs":45000}'
 ARG=$(printf '%s' "$CFG" | base64 -w0)
-python3 /data/workspace/camofox_solve.py "$ARG"      # Python
-/data/workspace/camofox_solve_rust "$ARG"            # Rust (if compiled)
+/data/workspace/camofox_solve_rust "$ARG"            # the installed engine
 ```
 
 One JSON line comes back:
@@ -58,26 +57,25 @@ One JSON line comes back:
  "method":"camofox-browser","popupClosed":0,"clicked":true,"url":"..."}
 ```
 
-## Which engine runs by default
+## Which engine runs
 
-**The extension runs the Python solver.** `extension/background.js` defaults to
-`solverPath: /data/workspace/camofox_solve.py` with
-`solverPython: /data/workspace/camoufox-venv/bin/python`, and the popup exposes
-both fields if you want to change them.
+**There is one engine: the Rust solver.** `extension/background.js` defaults to
+`solverPath: /data/workspace/camofox_solve_rust` with an empty `solverPython`, so
+the binary is executed directly. The popup exposes both fields if you need to
+point at something else, but the installer only ever produces the Rust binary.
 
-The Rust solver is installed alongside it at `/data/workspace/camofox_solve_rust`
-and is faster (~8.4s vs ~9.5s in the measurements below), but it is **opt-in**:
-set `solverPath` to `/data/workspace/camofox_solve_rust` and clear `solverPython`
-in the extension popup. The installer always compiles it when `rustc` is present,
-so switching is a config change, not a reinstall.
+Shipping both engines had no point: two code paths to keep in sync, two things to
+debug, and only one of them ever ran. The Python solver stays in `solver/` as a
+readable reference and is **not installed**.
 
-| Engine | Path | Default for | Typical wall |
+| Engine | Path | Installed | Typical wall |
 | --- | --- | --- | --- |
-| Python | `camofox_solve.py` | the extension | 9.4–9.6 s |
-| Rust | `camofox_solve_rust` | command line / opt-in | 8.3–8.9 s |
+| Rust | `camofox_solve_rust` | always (the only one) | 8.1–9.0 s |
+| Python | `camofox_solve.py` | no — reference only | 9.4–9.6 s |
 
-Both drive the same camofox-browser HTTP API on `127.0.0.1:9377`; neither talks
-to Apify.
+`rustc` is therefore a hard requirement: the installer fails loudly rather than
+starting a browser that cannot solve. Both engines drive the same camofox-browser
+HTTP API on `127.0.0.1:9377`; neither talks to Apify.
 
 ## How the click works (the part that took the longest)
 
@@ -105,15 +103,19 @@ the label. That passes on some sites and silently fails on others.
 
 ## Benchmarks
 
-InstaBox VM, 4 vCPU / 8 GB, headed Camoufox, 2 rounds each, all passing:
+InstaBox VM, 4 vCPU / 8 GB, headed Camoufox, all passing. The Rust column is what
+actually runs now; the Python column is the reference implementation.
 
 | Site | Python wall | Rust wall |
 | --- | --- | --- |
 | demo.turnstile.workers.dev | 13.7 s | **8.8 s** |
-| solvegate.io/demo/managed | 16.4 s | **11.8 s** |
-| 100milionseek.top/recover | 16.2 s | **11.9 s** |
+| solvegate.io/demo/managed | 16.4 s | **8.1–8.9 s** |
+| 100milionseek.top/recover | 16.2 s | **8.9–9.2 s** |
 | elysium.kinetiq.xyz faucet | 18.9 s | **10.8 s** |
 | 2captcha.com demo | 19.3 s | — |
+
+Fresh-install measurement on a wiped VM: **5/5 on solvegate at 8.1–8.4 s**, and the
+extension end to end at **11.3 s** and **12.3 s** on two real targets.
 
 Per-solve Cloudflare time is identical (~6–9 s) in both languages. Rust wins on
 wall time because it reuses one keep-alive HTTP connection to camofox-browser
