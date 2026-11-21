@@ -1,0 +1,23 @@
+{
+  "manifest_version": 2,
+  "name": "Turnstile Auto Solver (InstaBox) - Firefox/Camoufox",
+  "version": "1.1.0",
+  "description": "Auto-solves Cloudflare Turnstile widgets using our camofox-browser solver on InstaBox. No Apify.",
+  "permissions": ["<all_urls>", "https://api.instabox.sh/*", "storage", "tabs", "activeTab"],
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": true
+  },
+  "browser_action": {
+    "default_popup": "popup.html",
+    "default_title": "Turnstile Auto Solver"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}
