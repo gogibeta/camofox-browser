@@ -45,3 +45,7 @@ playwright-report/
 
 # Local git worktrees (e.g. from parallel delegation runs) — keep them out of test discovery
 .worktrees/
+
+# Python bytecode
+__pycache__/
+*.pyc

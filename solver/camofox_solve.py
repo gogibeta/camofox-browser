@@ -204,6 +204,7 @@ def solve(cfg: dict) -> dict:
     token = ""
     popup_closed = 0
     clicked = False
+    next_click_at = 0.0
     tab = None
     error = None
 
@@ -226,7 +227,8 @@ def solve(cfg: dict) -> dict:
             if token:
                 break
 
-            if not clicked:
+            if time.monotonic() >= next_click_at:
+                next_click_at = time.monotonic() + 1.5
                 try:
                     camofox.evaluate(tab, WIDGET_SCROLL_JS, timeout=5)
                 except Exception:

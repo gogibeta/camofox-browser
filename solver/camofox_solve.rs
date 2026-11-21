@@ -489,12 +489,17 @@ fn solve(cfg: &J) -> Result<String, String> {
     let mut token = String::new();
     let mut clicked = false;
     let deadline = t0 + Duration::from_millis(timeout);
+    // Retry the click instead of trying exactly once: on a cold browser the
+    // widget's iframe is not clickable for the first second or two, and a single
+    // early attempt then left the loop polling a widget nobody had clicked.
+    let mut next_click_at = Instant::now();
     while Instant::now() < deadline {
         if let Ok(Some(v)) = client.evaluate(&tab, TOKEN_JS, 5_000) {
             if let Some(s) = v.as_str() { token = s.to_string(); }
         }
         if !token.is_empty() { break; }
-        if !clicked {
+        if Instant::now() >= next_click_at {
+            next_click_at = Instant::now() + Duration::from_millis(1_500);
             let _ = client.evaluate(&tab, WIDGET_SCROLL_JS, 5_000);
             sleep(Duration::from_millis(400));
             if let Ok(Some(rect)) = client.evaluate(&tab, WIDGET_RECT_JS, 5_000) {
