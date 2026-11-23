@@ -85,8 +85,8 @@ about it. There are three buckets:
 
 | Bucket | Captchas | What actually happens |
 | --- | --- | --- |
-| **Clears** | Turnstile, Cloudflare Managed Challenge | The plugin clicks the challenge frame in-process and it passes in 4–8 s. This is the part that is genuinely automated. |
-| **Self-solving** | FriendlyCaptcha (proof of work), reCAPTCHA v3 (invisible) | Nothing to click. They resolve on their own given a browser that does not look automated, and the plugin notices within 1 s. |
+| **Clears** | Turnstile, Cloudflare Managed Challenge, FriendlyCaptcha | The plugin clicks the challenge frame in-process and it passes in 4–8 s. This is the part that is genuinely automated. |
+| **Self-solving** | reCAPTCHA v3 (invisible) | Nothing to click. It resolves on its own given a browser that does not look automated, and the plugin notices within 1 s. |
 | **Reported, not solved** | hCaptcha checkbox, reCAPTCHA v2 checkbox, hCaptcha / reCAPTCHA v2 **image grids**, GeeTest sliders, Arkose FunCaptcha, AWS WAF, DataDome | The plugin finds and clicks the checkbox, and the provider then opens a puzzle. The answer to a puzzle is not in the DOM, so nothing browser-side can produce it. The plugin says so instead of clicking at tiles blindly. |
 
 The third row is the honest limit, and it was measured rather than assumed:
@@ -130,7 +130,7 @@ how to answer it, which frame to click, and where the answer lands.
 | Cloudflare Managed Challenge | `cf-managed` | `click` | outer frame first |
 | hCaptcha | `hcaptcha` | `click` | inner checkbox first |
 | reCAPTCHA v2 | `recaptcha-v2` | `click` | inner checkbox first |
-| FriendlyCaptcha | `friendlycaptcha` | `wait` (proof of work) | — |
+| FriendlyCaptcha | `friendlycaptcha` | `click` (starts the proof of work) | inner checkbox first |
 | reCAPTCHA v3 | `recaptcha-v3` | `wait` (invisible) | — |
 | GeeTest | `geetest` | `human` (slider) | — |
 | Arkose FunCaptcha | `funcaptcha` | `human` | — |
@@ -164,6 +164,17 @@ again. A panel (`height >= 220`, or `width >= 320 && height >= 180`) means the
 provider opened a puzzle; the plugin logs `captcha opened a puzzle` and stops.
 A click that is merely intercepted while no panel is present is retried, because
 a transient overlay and a real puzzle produce the same Playwright error.
+
+**A non-empty response field is not an answer.** FriendlyCaptcha writes state
+markers into the very field that later holds its solution: `.UNCONNECTED` while
+the frame loads, then `.UNACTIVATED` until the proof of work runs. Both are
+12-character strings, so a length or truthiness check reads one as a solved
+captcha. Measured on the demo page: the field sat at `.UNACTIVATED` for 27 s of
+polling and only produced a real 6.4 KB solution ~3 s after an actual click. The
+plugin therefore rejects any dot-prefixed capital marker as a value, and
+FriendlyCaptcha's strategy is `click` rather than `wait` — the widget is inert
+until it is clicked. Before that fix the plugin reported "captcha answered" in
+7 ms with zero clicks, which was simply false.
 
 ## Turnstile widgets vs Cloudflare Managed Challenges
 
@@ -284,7 +295,7 @@ actually runs now; the Python column is the reference implementation.
 | demo.turnstile.workers.dev | Turnstile widget | — | token, 8.8 s |
 | free.nodaroo.com | Managed Challenge | cleared 4.9–8.9 s | clearance, 5.7–7.5 s |
 | glassdoor.com | Managed Challenge | cleared 2.4–8.2 s | clearance, 5.7–7.5 s |
-| friendlycaptcha.com/demo | FriendlyCaptcha | answered 0.1–2.4 s, 0 clicks | token, 6.3–6.5 s |
+| friendlycaptcha.com/demo | FriendlyCaptcha | answered 7.3–9.6 s, 1 click | token, 6.4 KB, 9.6 s |
 | accounts.hcaptcha.com/demo | hCaptcha | clicked, then puzzle (5.4 s) | no token, reported at 27 s |
 | google.com/recaptcha/api2/demo | reCAPTCHA v2 | clicked, then puzzle (2.0 s) | no token, reported at 25 s |
 
@@ -295,12 +306,20 @@ outcomes, not regressions: those demo widgets challenge every visitor.
 Last full run against the committed code:
 
 ```
-nodaroo (plugin)      cleared 7.4 s
-glassdoor (plugin)    cleared 7.6 s
-nodaroo (solver)      clearance, 455 chars, 6.0 s, captcha=cf-managed
-solvegate (solver)    token, 645 chars, 6.0 s, captcha=turnstile
-100milionseek         token, 666 chars, 8.1 s, captcha=turnstile
-friendlycaptcha       answered 2.4 s, 0 clicks
+nodaroo (plugin)      cleared 6.8 s
+glassdoor (plugin)    cleared 7.8 s
+solvegate (plugin)    answered 3.6 s
+100milionseek         answered 4.8 s
+hCaptcha (plugin)     clicked, then puzzle, reported 6.3 s
+reCAPTCHA v2 (plugin) clicked, then puzzle, reported 2.1 s
+friendlycaptcha       answered 7.3 s, 1 click
+nodaroo (solver)      clearance, 6.3 s, captcha=cf-managed
+glassdoor (solver)    clearance, 8.4 s, captcha=cf-managed
+solvegate (solver)    token, 666 chars, 6.1 s, captcha=turnstile
+100milionseek         token, 666 chars, 8.8 s, captcha=turnstile
+friendlycaptcha       token, 6433 chars, 9.6 s, captcha=friendlycaptcha
+hCaptcha (solver)     no token, reported at 28 s
+reCAPTCHA v2 (solver) no token, reported at 27 s
 ```
 
 Fresh-install measurement on a wiped VM: **5/5 on solvegate at 8.1–8.4 s**.

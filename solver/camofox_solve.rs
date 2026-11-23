@@ -450,23 +450,37 @@ const ANY_TOKEN_JS: &str = r#"(() => {
     ['funcaptcha', 'fc-token'],
     ['awswaf', 'aws-waf-token']
   ];
+  // A field being non-empty is not the same as it holding an answer.
+  // FriendlyCaptcha walks its field through dot-prefixed state markers --
+  // `.UNCONNECTED`, then `.UNACTIVATED` -- and only writes a real solution at
+  // the end. Measured on the demo page, the field sits at `.UNACTIVATED` for as
+  // long as it is left alone, so accepting any non-empty value reports a solved
+  // captcha that was never solved. A real solution is never dot-prefixed caps,
+  // so that whole shape is rejected rather than enumerated.
+  const SENTINEL = /^(?:\.[A-Z][A-Z_]*:?|undefined|null|false|0)$/;
+  const usable = (v) => {
+    const s = String(v == null ? '' : v).trim();
+    if (!s) return '';
+    return SENTINEL.test(s) ? '' : s;
+  };
   for (const [kind, name] of fields) {
     const el = document.querySelector('input[name="' + name + '"], textarea[name="' + name + '"]');
-    if (el && el.value) return { kind: kind, field: name, token: el.value };
+    const v = el ? usable(el.value) : '';
+    if (v) return { kind: kind, field: name, token: v };
   }
   // hCaptcha and reCAPTCHA sometimes only expose the token through a callback
   // store; a populated global is the only readable signal in that case.
   try {
     const h = window.hcaptcha;
     if (h && typeof h.getResponse === 'function') {
-      const r = h.getResponse();
+      const r = usable(h.getResponse());
       if (r) return { kind: 'hcaptcha', field: 'h-captcha-response', token: r };
     }
   } catch (_) {}
   try {
     const g = window.grecaptcha;
     if (g && g.getResponse) {
-      const r = g.getResponse();
+      const r = usable(g.getResponse());
       if (r) return { kind: 'recaptcha', field: 'g-recaptcha-response', token: r };
     }
   } catch (_) {}

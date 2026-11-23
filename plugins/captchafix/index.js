@@ -174,9 +174,15 @@ const CAPTCHAS = [
   {
     kind: 'friendlycaptcha',
     label: 'FriendlyCaptcha (proof of work)',
-    strategy: 'wait',
+    // NOT a pure wait. The widget is inert until it is clicked: measured on
+    // the demo page, its field stays at the `.UNACTIVATED` sentinel for 27s of
+    // polling and only produces a real 6.4 KB solution ~3s after a click. A
+    // 'wait' strategy here reports the sentinel as an answer and calls a
+    // captcha "solved" in 7ms without ever touching it.
+    strategy: 'click',
     frame: /friendlycaptcha\.com|frcapi\.com/i,
     response: 'frc-captcha-response',
+    checkbox: ['input[type="checkbox"]', '[role="checkbox"]', 'button'],
   },
   {
     kind: 'geetest',
@@ -304,6 +310,45 @@ async function puzzlePanel(page) {
       }
       return false;
     });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A site-wide banner sitting on top of the widget: an incident report panel, a
+ * cookie bar, a "try the new site" modal. These are not captchas -- they are
+ * ordinary DOM overlays with a real close control. Clicking it is the honest
+ * thing to do, and it clears the way for the widget.
+ *
+ * Returns true if a banner was found and clicked.
+ */
+async function dismissOverlay(page, log) {
+  let overlay;
+  try {
+    overlay = await page.evaluate(() => {
+      for (const el of Array.from(document.querySelectorAll('button, a, [role="button"], input[type="button"]'))) {
+        const t = (el.textContent || el.value || '').trim().toLowerCase();
+        if (!/^(close|dismiss|hide|x|×)$/.test(t)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 10 || r.height < 10) continue;
+        if (r.top < -1000 || r.left < -1000) continue;
+        if (r.top >= window.innerHeight || r.left >= window.innerWidth) continue;
+        const style = window.getComputedStyle(el);
+        if (style.visibility === 'hidden' || style.display === 'none') continue;
+        return { text: t, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      }
+      return null;
+    });
+  } catch {
+    return false;
+  }
+  if (!overlay) return false;
+  try {
+    await page.mouse.click(overlay.x, overlay.y);
+    if (log) log('info', 'captchafix: dismissed overlay banner', { text: overlay.text });
+    await sleep(700);
+    return true;
   } catch {
     return false;
   }
@@ -447,6 +492,19 @@ function widgetShape(box) {
   return 'checkbox';
 }
 
+/**
+ * Placeholder values providers put in their response field to mean "no answer
+ * yet". FriendlyCaptcha is the important one: before the proof of work runs its
+ * field holds `.UNCONNECTED`, then `.UNACTIVATED`, and only becomes a real
+ * solution at the end. A length check alone therefore reports a solved captcha
+ * that has not been solved at all -- measured on the demo page, where the field
+ * sits at `.UNACTIVATED` for as long as it is left alone.
+ *
+ * The state markers are all dot-prefixed capitals, so that shape is rejected
+ * wholesale rather than enumerated: a real solution is never shaped like one.
+ */
+const TOKEN_SENTINEL_RE = /^(?:\.[A-Z][A-Z_]*:?|undefined|null|false|0)$/;
+
 /** Is the page's response field already populated? */
 async function responseFilled(page, name) {
   if (!name) return false;
@@ -454,11 +512,16 @@ async function responseFilled(page, name) {
     const value = await page.evaluate(
       (field) => {
         const el = document.querySelector(`[name="${field}"], #${field}`);
-        return el && el.value ? el.value.length : 0;
+        return el && el.value ? String(el.value) : '';
       },
       name,
     );
-    return Number(value) > 0;
+    const trimmed = String(value || '').trim();
+    if (!trimmed) return false;
+    // A sentinel is not an answer. FriendlyCaptcha sits at `.UNCONNECTED` and
+    // then `.UNACTIVATED` for as long as the proof of work has not completed.
+    if (TOKEN_SENTINEL_RE.test(trimmed)) return false;
+    return true;
   } catch {
     return false;
   }
@@ -659,9 +722,24 @@ async function solveCaptcha(page, context, log, label) {
   while (Date.now() < deadline) {
     if (page.isClosed?.()) return;
     if (waitDeadline !== null && Date.now() > waitDeadline) {
-      log('info', 'captchafix: self-solving captcha finished its window', {
-        tab: label, kind: lastKind, ms: Date.now() - started,
-      });
+      // The window a proof-of-work captcha gets to prove itself has closed. Ask
+      // once more whether it actually produced an answer: this branch is reached
+      // when it did not, and saying "finished its window" without that check
+      // reads like success when it is a failure.
+      const answered = lastKind && (await responseFilled(
+        page,
+        (await detect(page) || {}).response || '',
+      ));
+      if (answered) {
+        log('info', 'captchafix: captcha answered', {
+          tab: label, kind: lastKind, clicks, ms: Date.now() - started,
+        });
+      } else {
+        log('warn', 'captchafix: self-solving captcha never produced an answer', {
+          tab: label, kind: lastKind, ms: Date.now() - started,
+          note: 'proof of work did not complete; the page may be blocking it',
+        });
+      }
       return;
     }
 
@@ -742,12 +820,20 @@ async function solveCaptcha(page, context, log, label) {
           // the checkbox has been passed and only a human can continue.
           // Otherwise it is a transient overlay and another attempt is
           // reasonable.
-          if (puzzlePanel(page)) {
+          if (await puzzlePanel(page)) {
             log('warn', 'captchafix: captcha needs a human', {
               tab: label, host, kind: entry.kind, label: entry.label,
               reason: 'puzzle covers the checkbox', ms: Date.now() - started,
             });
             return;
+          }
+          // A banner (cookie bar, incident panel) covering the checkbox is not a
+          // puzzle -- dismiss it and retry, rather than giving up on a page
+          // whose only obstruction is a site-wide notice. Insert the dismissal
+          // here so a genuine puzzle still stops the loop in the branch above.
+          if (await dismissOverlay(page, log)) {
+            await sleep(700);
+            continue;
           }
           log('info', 'captchafix: click intercepted, retrying', {
             tab: label, host, kind: entry.kind, attempt: clicks + 1,
