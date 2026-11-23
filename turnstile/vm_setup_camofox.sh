@@ -24,23 +24,23 @@ if [ ! -x "$BIN" ]; then
 fi
 echo "using camoufox binary: $BIN"
 
-echo "[1/7] stopping old browser stack"
+echo "[1/8] stopping old browser stack"
 bash "$WS/stop-browser.sh" 2>/dev/null || true
 pkill -f "node server.js" 2>/dev/null || true
 pkill -f "camofox-browser" 2>/dev/null || true
 sleep 2
 
-echo "[2/7] cloning/updating camofox-browser (our fork, with the Turnstile kit)"
+echo "[2/8] cloning/updating camofox-browser (our fork, with the Turnstile kit)"
 if [ -d "$REPO/.git" ]; then
   git -C "$REPO" remote set-url origin "$REPO_URL"
   git -C "$REPO" fetch --depth=1 origin "$REPO_BRANCH" 2>&1 | tail -3
   # An older install left untracked copies of paths the fork now tracks
-  # (plugins/ipv4fix, extension/, solver/), and `checkout -B` refuses to
+  # (plugins/captchafix, extension/, solver/), and `checkout -B` refuses to
   # overwrite them. Remove only those specific untracked paths -- no reset, no
   # broad clean, so anything else in the checkout survives.
   if ! git -C "$REPO" checkout -B "$REPO_BRANCH" "origin/$REPO_BRANCH" 2>/dev/null; then
     echo "    clearing untracked kit paths that the fork now tracks"
-    for path in plugins/ipv4fix extension solver turnstile; do
+    for path in plugins/captchafix plugins/cloudflarefix plugins/ipv4fix extension solver turnstile; do
       if [ -e "$REPO/$path" ] && ! git -C "$REPO" ls-files --error-unmatch "$path" >/dev/null 2>&1; then
         rm -rf "$REPO/$path"
         echo "      removed $path"
@@ -54,17 +54,17 @@ else
 fi
 # The kit is the whole point of this fork; fail loudly rather than silently
 # installing a browser that cannot solve.
-if [ ! -f "$REPO/solver/camofox_solve.py" ] || [ ! -d "$REPO/extension" ]; then
-  echo "ERROR: $REPO is missing the Turnstile kit (solver/ or extension/)." >&2
+if [ ! -f "$REPO/solver/camofox_solve.rs" ] || [ ! -d "$REPO/extension" ]; then
+  echo "ERROR: $REPO is missing the Turnstile kit (solver/camofox_solve.rs or extension/)." >&2
   echo "       Check CAMOFOX_REPO_URL/BRANCH (now: $REPO_URL @ $REPO_BRANCH)." >&2
   exit 1
 fi
 
-echo "[3/7] npm ci"
+echo "[3/8] npm ci"
 cd "$REPO" || exit 1
 npm ci --omit=dev --no-audit --no-fund 2>&1 | tail -20
 
-echo "[4/7] writing config"
+echo "[4/8] writing config"
 # NOTE: the plugin loader reads camofox.config.json (camoFOX), not camoufox.config.json
 cat > "$REPO/camofox.config.json" <<'JSON'
 {
@@ -76,49 +76,32 @@ cat > "$REPO/camofox.config.json" <<'JSON'
   "plugins": {
     "youtube": { "enabled": true },
     "persistence": { "enabled": true },
-    "ipv4fix": { "enabled": true }
+    "captchafix": { "enabled": true }
   }
 }
 JSON
 
-echo "[5/7] installing ipv4fix plugin"
-# Prefer the fork's own plugin; the inline copy below is only a fallback for a
-# checkout that somehow lacks it.
-mkdir -p "$REPO/plugins/ipv4fix"
-if [ -f "$REPO/turnstile/plugins/ipv4fix.js" ]; then
-  cp -f "$REPO/turnstile/plugins/ipv4fix.js" "$REPO/plugins/ipv4fix/index.js"
-  echo "    using the fork's plugins/ipv4fix"
-else
-  cat > "$REPO/plugins/ipv4fix/index.js" <<'JS'
-export function register(_app, ctx) {
-  ctx.events.on('browser:launching', ({ options }) => {
-    options.firefoxUserPrefs = {
-      ...(options.firefoxUserPrefs || {}),
-      'javascript.enabled': true,
-      'network.dns.disableIPv6': true,
-      'browser.contentblocking.category': 'standard',
-      'privacy.trackingprotection.enabled': false,
-      'privacy.trackingprotection.pbmode.enabled': false,
-      'privacy.trackingprotection.cryptomining.enabled': false,
-      'privacy.trackingprotection.fingerprinting.enabled': false,
-    };
-    try {
-      const key = Object.keys(options.env || {}).find(k => /^CAMOU_CONFIG_/.test(k));
-      if (key) {
-        const cfg = JSON.parse(options.env[key]);
-        cfg['javascript.enabled'] = true;
-        cfg['network.dns.disableIPv6'] = true;
-        cfg['browser.contentblocking.category'] = 'standard';
-        cfg['privacy.trackingprotection.enabled'] = false;
-        cfg['privacy.trackingprotection.pbmode.enabled'] = false;
-        options.env[key] = JSON.stringify(cfg);
-      }
-    } catch {}
-    ctx.log('info', 'ipv4fix: disabled IPv6 DNS in Camoufox');
-  });
-}
-JS
+echo "[5/8] verifying the captchafix plugin"
+# captchafix supersedes ipv4fix. It sets the same anti-blocking prefs, but also:
+#   - disables COOP, without which challenge frames are never created at all
+#     (the page stays on "Just a moment..." forever);
+#   - patches every CAMOU_CONFIG_<n> chunk, not just the first, so the
+#     fingerprint keys that spilled into later chunks are not silently lost;
+#   - clears challenges in-process by clicking the challenge frame element,
+#     which a page-coordinate click cannot reach;
+#   - handles the other captcha families, and reports the ones that need a human
+#     instead of clicking at them blindly.
+# The plugin ships in the repo at plugins/captchafix/, so there is no staged copy
+# to install from: a second copy of the same 800-line file is a copy that goes
+# stale the first time one of them is edited.
+if [ ! -f "$REPO/plugins/captchafix/index.js" ]; then
+  echo "ERROR: $REPO/plugins/captchafix/index.js is missing." >&2
+  echo "       Cloudflare challenges and captchas would not be solvable; refusing to continue." >&2
+  exit 1
 fi
+echo "    using the fork's plugins/captchafix"
+# The old plugins must go, or they stay on disk and confuse the next reader.
+rm -rf "$REPO/plugins/ipv4fix" "$REPO/plugins/cloudflarefix"
 
 echo "[6/8] staging the extension and building the Rust solver"
 # One engine only. The Rust binary is the single solver: no interpreter to keep
@@ -155,7 +138,16 @@ echo "server pid $!"
 echo "[8/8] waiting for health"
 for i in $(seq 1 90); do
   if curl -fsS http://127.0.0.1:9377/health >/dev/null 2>&1; then
+    # A server that is merely healthy is not enough: the plugin is what clears
+    # challenges, and a plugin-less server silently fails every one of them.
+    sleep 1
+    if ! grep -q 'plugin loaded.*"captchafix"' "$WS/camofox-browser.log"; then
+      echo "HEALTH FAILED: server is up but the captchafix plugin did not load" >&2
+      grep -i 'plugin' "$WS/camofox-browser.log" | tail -20 >&2
+      exit 1
+    fi
     echo "HEALTH OK"
+    echo "captchafix OK"
     curl -fsS http://127.0.0.1:9377/health
     exit 0
   fi

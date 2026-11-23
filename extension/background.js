@@ -55,6 +55,14 @@ async function solveOnInstabox(info, cfg) {
     cdata: info.cdata || '',
     timeoutMs: Number(cfg.timeoutMs) || 45000,
     camofoxUrl: cfg.camofoxUrl || 'http://127.0.0.1:9377',
+    // "auto" lets the solver decide: a Turnstile widget yields a token, a
+    // Cloudflare Managed Challenge yields a cf_clearance cookie instead, and any
+    // other provider yields its own token field.
+    mode: info.mode || 'auto',
+    // The provider the content script saw, when it could tell. Advisory only:
+    // the solver reads every response field regardless, because a page can
+    // render a different widget than the one that was detected.
+    captcha: info.kind || '',
   };
   const arg = b64(JSON.stringify(payload));
   // solverPython is optional: it is the interpreter for a .py solver. A compiled
@@ -88,10 +96,25 @@ async function solveOnInstabox(info, cfg) {
   } catch (_) {
     throw new Error('Solver returned a non-JSON response: ' + stdout.slice(0, 200));
   }
-  if (result.error || !result.token) throw new Error(result.error || 'No token returned');
+  if (result.error) throw new Error(result.error);
+  // Two success shapes. A Turnstile widget produces a token for the page to
+  // consume; a Cloudflare Managed Challenge produces no token at all, only a
+  // cf_clearance cookie (already stored in the browser that solved it, so the
+  // page reloads clean). Accepting only a token would report every managed
+  // challenge as a failure.
+  const hasToken = typeof result.token === 'string' && result.token.length > 0;
+  const hasClearance = typeof result.clearance === 'string' && result.clearance.length > 0;
+  if (!hasToken && !hasClearance) throw new Error('No token or clearance returned');
   return {
     ok: true,
-    token: result.token,
+    token: hasToken ? result.token : null,
+    clearance: hasClearance ? result.clearance : null,
+    result: result.result || (hasToken ? 'token' : 'clearance'),
+    // Which provider answered ("turnstile", "hcaptcha", "recaptcha", ...). The
+    // content script needs it to write the token into the right response field
+    // and to tell the right provider API about it.
+    captcha: result.captcha || info.kind || null,
+    challenge: !!result.challenge,
     durationMs: result.durationMs,
     method: result.method || 'camofox-browser',
     error: null,

@@ -1,8 +1,13 @@
 #!/bin/bash
 # One-shot installer for the camofox-browser Turnstile kit.
 #
-# Installs the server, the solver (Python + optional Rust), the browser
-# extension, and starts a headed browser on DISPLAY=:1 bound to 127.0.0.1:9377.
+# Installs the server, the solver (Rust), the browser extension, and starts a
+# headed browser on DISPLAY=:1 bound to 127.0.0.1:9377.
+#
+# Also installs the captchafix plugin, which is what makes Cloudflare Managed
+# Challenges and click-through captchas solvable: with Camoufox's defaults the
+# challenge frame is never created, and a page-coordinate click cannot reach a
+# widget inside a cross-origin frame.
 #
 # Usage:
 #   bash turnstile/install.sh              # full install + start
@@ -67,14 +72,23 @@ cat > "$REPO/camofox.config.json" <<'JSON'
   "plugins": {
     "youtube": { "enabled": true },
     "persistence": { "enabled": true },
-    "ipv4fix": { "enabled": true }
+    "captchafix": { "enabled": true }
   }
 }
 JSON
-mkdir -p "$REPO/plugins/ipv4fix"
-if [ -f "$REPO/turnstile/plugins/ipv4fix.js" ]; then
-  cp "$REPO/turnstile/plugins/ipv4fix.js" "$REPO/plugins/ipv4fix/index.js"
+# captchafix supersedes ipv4fix. It sets the same prefs, and also fixes the
+# CAMOU_CONFIG chunking bug that made ipv4fix silently ineffective (it patched
+# chunk 1 only, and the keys that mattered had spilled into chunk 2), plus the
+# COOP pref without which challenge frames are never created at all.
+#
+# The plugin ships in the repo, so there is no staged copy to install from: a
+# second copy of the same 800-line file is a copy that silently goes stale.
+if [ ! -f "$REPO/plugins/captchafix/index.js" ]; then
+  echo "plugins/captchafix/index.js is missing; Cloudflare challenges and captchas would not be solvable." >&2
+  exit 1
 fi
+# An older install may have left these behind; they are dead and confusing.
+rm -rf "$REPO/plugins/ipv4fix" "$REPO/plugins/cloudflarefix"
 
 echo "==> [6/8] installing the extension and building the Rust solver"
 # One engine only: the Rust binary. No interpreter to keep in sync, ~1s faster.
@@ -120,6 +134,15 @@ for _ in $(seq 1 90); do
     echo "HEALTH OK"
     curl -fsS "http://127.0.0.1:$PORT/health"
     echo
+    # A server that is healthy but running without the plugin still cannot
+    # clear a challenge, so verify the plugin actually loaded before declaring
+    # success.
+    if ! grep -q 'plugin loaded.*"captchafix"' "$WS/camofox-browser.log"; then
+      echo "captchafix plugin did not load; Cloudflare challenges and captchas will fail." >&2
+      grep -E '"plugin (loaded|load failed)"' "$WS/camofox-browser.log" | tail -10 >&2
+      exit 1
+    fi
+    echo "captchafix OK"
     exit 0
   fi
   sleep 2

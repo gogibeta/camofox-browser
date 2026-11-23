@@ -34,9 +34,17 @@ $('solve').addEventListener('click', async () => {
   const [tab] = await api.tabs.query({ active: true, currentWindow: true });
   try {
     const res = await api.tabs.sendMessage(tab.id, { type: 'SCAN' });
-    $('status').textContent = res && res.status === 'found'
-      ? `Solving ${res.siteKey} ...`
-      : `No widget found (${res ? res.status : 'no reply'}).`;
+    if (!res) {
+      $('status').textContent = 'No reply from the page.';
+    } else if (res.status === 'found') {
+      $('status').textContent = `Solving ${res.siteKey} ...`;
+    } else if (res.status === 'challenge') {
+      $('status').textContent = 'Solving Cloudflare managed challenge ...';
+    } else if (res.status === 'already') {
+      $('status').textContent = 'A token is already present on this page.';
+    } else {
+      $('status').textContent = 'No widget or challenge found.';
+    }
   } catch (err) {
     $('status').textContent = String(err);
   }

@@ -6,8 +6,8 @@ camofox-browser based solver, and the setup script, then runs the setup which
 stops the old camoufox-server.py stack and starts our camofox-browser server.
 
 Usage:
-  python scripts/deploy_instabox.py
-  python scripts/deploy_instabox.py --skip-server   # only upload files
+  python turnstile/deploy_instabox.py
+  python turnstile/deploy_instabox.py --skip-server   # only upload files
 """
 from __future__ import annotations
 
@@ -25,7 +25,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REMOTE = "/data/workspace"
-PY = f"{REMOTE}/camoufox-venv/bin/python"
 
 
 def safe_print(text: str) -> None:
@@ -107,38 +106,51 @@ def main() -> None:
     print("Uploading extension + solver ...")
 
     upload_dir(machine, key, api, ROOT / "extension", f"{REMOTE}/turnstile-ext")
+    # One engine: the Rust binary. It has to be built on the VM (no link.exe on
+    # Windows, and the glibc has to match), so the source is uploaded and
+    # compiled here. The Python solver stays in the repo as a reference and is
+    # never uploaded - leaving it on the VM only invites a second, stale path.
     upload_bytes(
         machine, key, api,
-        (ROOT / "solver" / "camofox_solve.py").read_bytes(),
-        f"{REMOTE}/camofox_solve.py",
+        (ROOT / "solver" / "camofox_solve.rs").read_bytes(),
+        f"{REMOTE}/camofox_solve.rs",
     )
+    # These live in turnstile/, next to this script. An earlier layout had them
+    # in a scripts/ directory that no longer exists.
     upload_bytes(
         machine, key, api,
-        (ROOT / "scripts" / "vm_setup_camofox.sh").read_bytes(),
+        (ROOT / "turnstile" / "vm_setup_camofox.sh").read_bytes(),
         f"{REMOTE}/vm_setup_camofox.sh",
     )
     upload_bytes(
         machine, key, api,
-        (ROOT / "scripts" / "vm_ext_test.py").read_bytes(),
+        (ROOT / "turnstile" / "vm_ext_test.py").read_bytes(),
         f"{REMOTE}/vm_ext_test.py",
     )
-    # Optional Rust solver (camofox-rust clone). Uploaded + compiled on the VM
-    # so operators can switch solverPath to /data/workspace/camofox_solve_rust.
-    rust_src = ROOT / "camofox-rust" / "solver" / "camofox_solve.rs"
-    if rust_src.exists():
-        upload_bytes(machine, key, api, rust_src.read_bytes(), f"{REMOTE}/camofox_solve.rs")
-        result = exec_cmd(machine, key, api,
-                          f"cd {REMOTE} && rustc --edition 2021 -O camofox_solve.rs -o camofox_solve_rust 2>&1 | tail -3",
-                          timeout=180)
-        safe_print("Rust solver: " + (result.get("stdout") or "").strip()[:200])
+
+    build = exec_cmd(
+        machine, key, api,
+        f"cd {REMOTE} && rustc --edition 2021 -O camofox_solve.rs -o camofox_solve_rust "
+        f"&& chmod +x camofox_solve_rust && echo BUILD_OK",
+        timeout=600,
+    )
+    if "BUILD_OK" not in (build.get("stdout") or ""):
+        safe_print("Rust build failed: "
+                   + ((build.get("stdout") or "") + (build.get("stderr") or ""))[-400:])
+        raise SystemExit("the Rust solver did not compile; aborting deploy")
+    # A stale Python solver from an earlier install is removed here rather than
+    # left for someone to point solverPath at.
+    exec_cmd(machine, key, api,
+             f"rm -f {REMOTE}/camofox_solve.py {REMOTE}/instabox_solver.py")
+    safe_print("Rust solver: built")
 
     config = {
         "instaboxApiKey": key,
         "instaboxMachineId": machine,
         "instaboxApiUrl": api,
         "camofoxUrl": "http://127.0.0.1:9377",
-        "solverPath": f"{REMOTE}/camofox_solve.py",
-        "solverPython": PY,
+        "solverPath": f"{REMOTE}/camofox_solve_rust",
+        "solverPython": "",
         "timeoutMs": int(os.environ.get("TIMEOUT_MS") or 45000),
         "autoSolve": True,
     }

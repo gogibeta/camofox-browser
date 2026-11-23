@@ -36,6 +36,12 @@ impl J {
     fn as_num(&self) -> Option<f64> {
         if let J::Num(n) = self { Some(*n) } else { None }
     }
+    fn as_arr(&self) -> Option<&[J]> {
+        if let J::Arr(v) = self { Some(v) } else { None }
+    }
+    fn as_bool(&self) -> Option<bool> {
+        if let J::Bool(b) = self { Some(*b) } else { None }
+    }
 }
 
 struct Parser<'a> {
@@ -291,6 +297,20 @@ impl Conn {
 // click by then is not going to; more clicks only add noise to the challenge.
 const MAX_CLICK_ATTEMPTS: u32 = 4;
 
+// A Managed Challenge is scored by Cloudflare after the click, so give it a
+// few spaced attempts rather than hammering it.
+const MAX_CHALLENGE_CLICKS: u32 = 5;
+
+// How long to keep polling after the last click before concluding the click did
+// nothing. Without this the loop runs to the full timeout on every captcha whose
+// answer is not reachable from here, which turns a definite "no" into a 40s wait.
+const CLICK_GRACE_MS: u64 = 6_000;
+
+// Window size applied to the Camoufox window before solving. Kept at the value
+// the solver has always used: page coordinates are derived from the rendered
+// layout, so changing this changes where clicks land.
+const WINDOW_SIZE: (&str, &str) = ("1530", "619");
+
 const CLOSE_POPUPS_JS: &str = r#"(() => {
   const vis = e => {
     const s = getComputedStyle(e), r = e.getBoundingClientRect();
@@ -307,11 +327,6 @@ const CLOSE_POPUPS_JS: &str = r#"(() => {
   document.querySelectorAll('[data-apology-close],[data-outage-close],[data-close],[aria-label*=Close i]')
     .forEach(e => { try { e.click(); n++; } catch (_) {} });
   return n;
-})()"#;
-
-const TOKEN_JS: &str = r#"(() => {
-  const e = document.querySelector('input[name=cf-turnstile-response]');
-  return e && e.value ? e.value : '';
 })()"#;
 
 const WIDGET_SCROLL_JS: &str = r#"(() => {
@@ -378,6 +393,209 @@ const WIDGET_RECT_JS: &str = r#"(() => {
     x: Math.round(Math.max(1, Math.min(r.left + 30, r.right - 2))),
     y: Math.round(Math.max(1, Math.min(r.top + r.height / 2, r.bottom - 2))),
   };
+})()"#;
+
+// ---------- managed-challenge (interstitial) mode ----------
+
+// A Cloudflare Managed Challenge is not a Turnstile widget: the page carries no
+// sitekey, no `.cf-turnstile` element and no response field. It renders only an
+// obfuscated shell plus a cross-origin iframe at challenges.cloudflare.com, and
+// success is signalled by a `cf_clearance` cookie (httpOnly, so it must be read
+// from the cookie jar) rather than by a token on the page.
+//
+// Only signals that are specific to an interstitial belong here. Generic
+// containers (`.main-wrapper`) false-positive on ordinary pages that happen to
+// use that class, which made a Turnstile widget page look like a challenge.
+const PAGE_STATE_JS: &str = r#"(() => {
+  const t = document.title || '';
+  const challengeTitle = /just a moment|verify you are human|checking your browser|attention required|one more step/i.test(t);
+  const hasOpts = typeof window._cf_chl_opt === 'object' && window._cf_chl_opt !== null;
+  const shell = !!document.querySelector(
+    '#challenge-form, #challenge-stage, #challenge-body-text, #challenge-running'
+  );
+  const body = document.body ? document.body.innerText.slice(0, 400) : '';
+  const bodyShell = /performing security verification|verify you are human|checking your browser/i.test(body);
+  return {
+    title: t,
+    challenge: challengeTitle || hasOpts || shell || bodyShell,
+    url: location.href,
+    bodyLen: body.length,
+  };
+})()"#;
+
+// Every captcha response field worth reading, keyed by the field's `name`.
+//
+// This is the whole of "solve every captcha type" from the solver's side: a
+// captcha's answer is a string in a named field, and which field it is depends
+// only on the provider. Turnstile and a Cloudflare managed challenge share
+// `cf-turnstile-response`; the rest each have their own. Reading them all costs
+// one querySelector pass and means a page carrying an hCaptcha is not reported
+// as "no widget".
+//
+// Widgets whose answer is never a DOM string (image grids, sliders, FunCaptcha)
+// are absent on purpose: there is nothing to read, and inventing a field would
+// only produce false successes. The browser-side plugin reports those.
+//
+// Read the first populated captcha response field on the page.
+//
+// `kind` names which provider answered, so a caller can tell a Turnstile token
+// from an hCaptcha token without guessing from its shape.
+const ANY_TOKEN_JS: &str = r#"(() => {
+  const fields = [
+    ['turnstile', 'cf-turnstile-response'],
+    ['hcaptcha', 'h-captcha-response'],
+    ['recaptcha', 'g-recaptcha-response'],
+    ['friendlycaptcha', 'frc-captcha-response'],
+    ['geetest', 'geetest_validate'],
+    ['funcaptcha', 'fc-token'],
+    ['awswaf', 'aws-waf-token']
+  ];
+  for (const [kind, name] of fields) {
+    const el = document.querySelector('input[name="' + name + '"], textarea[name="' + name + '"]');
+    if (el && el.value) return { kind: kind, field: name, token: el.value };
+  }
+  // hCaptcha and reCAPTCHA sometimes only expose the token through a callback
+  // store; a populated global is the only readable signal in that case.
+  try {
+    const h = window.hcaptcha;
+    if (h && typeof h.getResponse === 'function') {
+      const r = h.getResponse();
+      if (r) return { kind: 'hcaptcha', field: 'h-captcha-response', token: r };
+    }
+  } catch (_) {}
+  try {
+    const g = window.grecaptcha;
+    if (g && g.getResponse) {
+      const r = g.getResponse();
+      if (r) return { kind: 'recaptcha', field: 'g-recaptcha-response', token: r };
+    }
+  } catch (_) {}
+  return null;
+})()"#;
+
+// Locate any click-through captcha widget on the page, for the coordinate-click
+// fallback.
+//
+// Turnstile and Cloudflare are handled by CHALLENGE_TARGET_JS below; this covers
+// the others by their frame URL, which is the only reliable handle: the widget
+// is cross-origin, so its internals are unreadable, and its host element is
+// usually an obfuscated div.
+const ANY_WIDGET_JS: &str = r#"(() => {
+  const out = [];
+  const push = (el, kind) => {
+    if (!el) return;
+    let r;
+    try { r = el.getBoundingClientRect(); } catch (_) { return; }
+    if (!r || r.width < 20 || r.height < 15) return;
+    if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) return;
+    // A panel is a puzzle, not a checkbox. Clicking its corner is worse than
+    // doing nothing.
+    if (r.height >= 220 || (r.width >= 320 && r.height >= 180)) return;
+    out.push({
+      kind: kind,
+      x: Math.round(Math.min(Math.max(0, r.left) + Math.max(12, Math.min(30, r.width * 0.15)), Math.min(r.right, innerWidth) - 2)),
+      y: Math.round(Math.min(Math.max(0, r.top) + r.height / 2, innerHeight - 2)),
+      w: Math.round(r.width),
+      h: Math.round(r.height),
+    });
+  };
+  const patterns = [
+    ['hcaptcha', /(?:newassets|assets|js)\.hcaptcha\.com|hcaptcha\.com\/1\/api\.js/i],
+    ['recaptcha', /(?:google\.com|recaptcha\.net)\/recaptcha\/(?:api2\/)?anchor/i],
+    ['friendlycaptcha', /friendlycaptcha\.com|frcapi\.com/i],
+    ['geetest', /geetest\.com|geevisit\.com/i],
+    ['funcaptcha', /arkoselabs\.com|funcaptcha\.(?:com|co)/i],
+    ['awswaf', /captcha\.awswaf\.com/i]
+  ];
+  // The frame element may sit in a shadow root, so walk those too.
+  const roots = [document];
+  const seen = new Set(roots);
+  for (let i = 0; i < roots.length && i < 40; i++) {
+    let els;
+    try { els = roots[i].querySelectorAll('*'); } catch (_) { continue; }
+    for (const el of els) {
+      if (el.tagName === 'IFRAME') {
+        let src = '';
+        try { src = el.src || ''; } catch (_) {}
+        if (/aframe|size=invisible|checkbox=false/i.test(src)) continue;
+        for (const [kind, re] of patterns) {
+          if (re.test(src)) { push(el, kind); break; }
+        }
+      }
+      let sr = null;
+      try { sr = el.shadowRoot || el.shadowRootUnl || null; } catch (_) { sr = null; }
+      if (sr && !seen.has(sr)) { seen.add(sr); roots.push(sr); }
+    }
+  }
+  return { targets: out.slice(0, 4), shadowRoots: roots.length - 1 };
+})()"#;
+
+// Locate a clickable target in a Managed Challenge.
+//
+// The widget iframe is NOT in the top document: Cloudflare puts it inside a
+// shadow root, so `document.querySelectorAll('iframe')` finds nothing and a
+// naive selector-based solver reports "no widget". This walks shadow roots
+// (open ones, plus Camoufox's `shadowRootUnl` bypass) to find the frame, then
+// returns page-relative coordinates.
+//
+// The click is dispatched at page coordinates rather than inside the frame,
+// because Firefox's Fission isolation blocks programmatic clicks that
+// originate inside a cross-origin child frame.
+const CHALLENGE_TARGET_JS: &str = r#"(() => {
+  const out = [];
+  const pushRect = (el, kind) => {
+    if (!el) return;
+    let r;
+    try { r = el.getBoundingClientRect(); } catch (_) { return; }
+    if (!r || r.width < 20 || r.height < 15) return;
+    // Reject anything that is not actually on screen.
+    if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) return;
+    out.push({
+      kind: kind,
+      x: Math.round(Math.min(Math.max(0, r.left) + Math.max(16, Math.min(30, r.width * 0.15)), Math.min(r.right, innerWidth) - 2)),
+      y: Math.round(Math.min(Math.max(0, r.top) + r.height / 2, innerHeight - 2)),
+      w: Math.round(r.width),
+      h: Math.round(r.height),
+    });
+  };
+  const isCfFrame = (src) => /challenges\.cloudflare\.com|challenge-platform|\/cdn-cgi\//.test(src || '');
+
+  // Breadth-first walk over the light DOM and every reachable shadow root.
+  const roots = [document];
+  const seen = new Set(roots);
+  for (let i = 0; i < roots.length && i < 40; i++) {
+    const root = roots[i];
+    let els;
+    try { els = root.querySelectorAll('*'); } catch (_) { continue; }
+    for (const el of els) {
+      if (out.length >= 4 && roots.length > 8) break;
+      // The Turnstile frame itself.
+      if (el.tagName === 'IFRAME' && isCfFrame(el.src)) pushRect(el, 'iframe');
+      // Older / alternate checkbox markup.
+      if (el.tagName === 'INPUT' && el.type === 'checkbox') pushRect(el, 'checkbox');
+      const role = el.getAttribute && el.getAttribute('role');
+      if (role === 'checkbox') pushRect(el, 'role');
+      if (el.classList && el.classList.contains('ctp-checkbox-label')) pushRect(el, 'label');
+      // Descend into shadow trees (open or bypass-enabled).
+      let sr = null;
+      try { sr = el.shadowRoot || el.shadowRootUnl || null; } catch (_) { sr = null; }
+      if (sr && !seen.has(sr)) { seen.add(sr); roots.push(sr); }
+    }
+  }
+
+  // Last resort: the obfuscated wrapper div — wide, short, below the header.
+  if (!out.length) {
+    let best = null;
+    document.querySelectorAll('div').forEach(d => {
+      let r;
+      try { r = d.getBoundingClientRect(); } catch (_) { return; }
+      if (r.width >= 200 && r.width <= 460 && r.height >= 40 && r.height <= 100 && r.top > 0) {
+        if (!best || r.width * r.height < best.w * best.h) best = { w: r.width, h: r.height, el: d };
+      }
+    });
+    if (best) pushRect(best.el, 'wrapper');
+  }
+  return { targets: out.slice(0, 4), shadowRoots: roots.length - 1 };
 })()"#;
 
 // ---------- solver ----------
@@ -451,6 +669,31 @@ impl Client {
         self.call("POST", &format!("/tabs/{}/click", tab), &body, 12_000)?;
         Ok(())
     }
+
+    /// Read cf_clearance from the server-side cookie jar.
+    ///
+    /// The cookie is httpOnly, so it is invisible to `document.cookie` and to
+    /// page evaluate. The storage-state export (a raw Playwright state object)
+    /// is the only way to see it.
+    fn clearance(&self) -> Option<String> {
+        let state = self.call(
+            "GET",
+            &format!("/sessions/{}/storage_state", self.uid),
+            "",
+            20_000,
+        ).ok()?;
+        let cookies = state.get("cookies")?;
+        for c in cookies.as_arr()? {
+            if c.get("name").and_then(J::as_str) == Some("cf_clearance") {
+                if let Some(v) = c.get("value").and_then(J::as_str) {
+                    if !v.is_empty() {
+                        return Some(v.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
     fn close(&self, tab: &str) {
         let mut guard = self.conn.borrow_mut();
         if guard.is_none() {
@@ -462,19 +705,42 @@ impl Client {
     }
 }
 
+/// Bring the Camoufox window to the foreground and size it.
+///
+/// Why this exists: a Managed Challenge's click is delivered through a real OS
+/// pointer event, and a background/unmapped window can swallow it.
+///
+/// Why it is fully detached: `xdotool windowactivate --sync` waits for the
+/// window manager to confirm the activation, which took 15s on a headful Xvfb
+/// host — 75% of the whole solve. Nothing here is worth waiting for, so every
+/// call runs detached and its exit status is ignored. `WINDOW_SIZE` matches the
+/// viewport camofox is told to use, so page coordinates stay stable.
 fn fullscreen_desktop() {
-    let _ = Command::new("xdotool").args(["search", "--class", "camoufox"])
-        .env("DISPLAY", ":1").output().map(|out| {
-            let wins = String::from_utf8_lossy(&out.stdout);
-            if let Some(win) = wins.lines().last() {
-                let _ = Command::new("xdotool").args(["windowactivate", "--sync", win])
-                    .env("DISPLAY", ":1").output();
-                let _ = Command::new("xdotool").args(["windowsize", win, "1530", "619"])
-                    .env("DISPLAY", ":1").output();
-                let _ = Command::new("xdotool").args(["windowmove", win, "0", "0"])
-                    .env("DISPLAY", ":1").output();
+    let run = |args: &[&str]| {
+        let _ = Command::new("xdotool")
+            .args(args)
+            .env("DISPLAY", ":1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    };
+    // `--sync` is deliberately absent: it is the call that blocked.
+    if let Ok(out) = Command::new("xdotool")
+        .args(["search", "--class", "camoufox"])
+        .env("DISPLAY", ":1")
+        .output()
+    {
+        let wins = String::from_utf8_lossy(&out.stdout);
+        if let Some(win) = wins.lines().last() {
+            let win = win.trim();
+            if !win.is_empty() {
+                run(&["windowactivate", win]);
+                run(&["windowsize", win, WINDOW_SIZE.0, WINDOW_SIZE.1]);
+                run(&["windowmove", win, "0", "0"]);
             }
-        });
+        }
+    }
 }
 
 fn solve(cfg: &J) -> Result<String, String> {
@@ -482,6 +748,16 @@ fn solve(cfg: &J) -> Result<String, String> {
     let timeout = cfg.get("timeoutMs").and_then(J::as_num).unwrap_or(45_000.0) as u64;
     let camofox_url = cfg.get("camofoxUrl").and_then(J::as_str)
         .unwrap_or("http://127.0.0.1:9377");
+    // "auto" (default) handles both: a Turnstile widget returns a token, a
+    // Managed Challenge returns a cf_clearance cookie. "widget" / "challenge"
+    // force one interpretation.
+    let mode = cfg.get("mode").and_then(J::as_str).unwrap_or("auto");
+    // Opt-in trace on stderr. stdout must stay a single JSON line, so all
+    // diagnostics go to stderr and are only emitted when `debug` is set.
+    let debug = cfg.get("debug").and_then(J::as_bool).unwrap_or(false);
+    macro_rules! trace {
+        ($($arg:tt)*) => { if debug { eprintln!("[solve] {}", format!($($arg)*)); } };
+    }
     let client = Client::new(camofox_url)?;
 
     let t0 = Instant::now();
@@ -491,41 +767,221 @@ fn solve(cfg: &J) -> Result<String, String> {
     sleep(Duration::from_secs(1));
 
     let mut token = String::new();
+    // Which provider answered, when the answer was a token. Reported so a caller
+    // does not have to guess a token's kind from its shape.
+    let mut token_kind = String::new();
+    let mut clearance = String::new();
+    let mut challenge_seen = false;
     let mut clicked = false;
     let deadline = t0 + Duration::from_millis(timeout);
+
     // Retry the click, but bound it: a cold browser has no clickable widget
     // iframe for the first second or two, so one attempt is too few; clicking
     // every couple of seconds for the whole timeout is too many.
     let mut next_click_at = Instant::now();
     let mut click_attempts = 0u32;
+    // A Managed Challenge needs a separate budget: the click lands in a
+    // cross-origin frame and Cloudflare then scores the session, so a couple of
+    // attempts spaced 3s apart is the useful shape.
+    let mut challenge_clicks = 0u32;
+    let mut next_challenge_click_at = Instant::now();
+    let mut quiet_samples = 0u32;
+    // Reading the cookie jar is a full storage-state export, which is far too
+    // heavy to do on every 350ms tick. Poll it on its own slower clock.
+    let mut next_clearance_check_at = Instant::now();
+    // Set when every click attempt has been spent. The loop then waits only
+    // CLICK_GRACE_MS for the effect to show before reporting failure, instead of
+    // idling until the caller's timeout.
+    let mut exhausted_at: Option<Instant> = None;
+
     while Instant::now() < deadline {
-        if let Ok(Some(v)) = client.evaluate(&tab, TOKEN_JS, 5_000) {
-            if let Some(s) = v.as_str() { token = s.to_string(); }
+        // --- widget signal: a response field carrying a real token ---
+        // Any provider, not just Turnstile: hCaptcha, reCAPTCHA, FriendlyCaptcha
+        // and the rest each have their own field, and all of them are readable
+        // the same way.
+        if mode != "challenge" {
+            match client.evaluate(&tab, ANY_TOKEN_JS, 5_000) {
+                Ok(Some(v)) => {
+                    if let Some(s) = v.get("token").and_then(J::as_str) {
+                        token = s.to_string();
+                        token_kind = v.get("kind").and_then(J::as_str).unwrap_or("").to_string();
+                    }
+                }
+                Ok(None) => trace!("token: no result"),
+                Err(e) => trace!("token: evaluate error: {}", e),
+            }
+            if !token.is_empty() { trace!("token found ({})", token_kind); break; }
         }
-        if !token.is_empty() { break; }
-        if click_attempts < MAX_CLICK_ATTEMPTS && Instant::now() >= next_click_at {
+
+        // --- challenge signal: cf_clearance in the cookie jar ---
+        // Checked on a slow clock, not every tick.
+        if mode != "widget" && clearance.is_empty() && Instant::now() >= next_clearance_check_at {
+            next_clearance_check_at = Instant::now() + Duration::from_millis(1_500);
+            match client.clearance() {
+                Some(c) => { trace!("cf_clearance found"); clearance = c; break; }
+                None => trace!("cf_clearance: absent"),
+            }
+        }
+
+        // --- is this an interstitial at all? ---
+        let mut on_challenge = false;
+        match client.evaluate(&tab, PAGE_STATE_JS, 5_000) {
+            Ok(Some(state)) => {
+                on_challenge = state.get("challenge").and_then(J::as_bool).unwrap_or(false);
+                trace!("state: challenge={} title={:?}", on_challenge,
+                       state.get("title").and_then(J::as_str).unwrap_or(""));
+            }
+            Ok(None) => trace!("state: no result"),
+            Err(e) => trace!("state: evaluate error: {}", e),
+        }
+        if on_challenge {
+            challenge_seen = true;
+            quiet_samples = 0;
+        } else if challenge_seen {
+            // Left the interstitial. Cloudflare sets cf_clearance on the way
+            // out, so re-check before declaring failure.
+            quiet_samples += 1;
+            if quiet_samples >= 2 {
+                if let Some(c) = client.clearance() { clearance = c; }
+                if !clearance.is_empty() { break; }
+            }
+        }
+
+        if on_challenge && mode != "widget" && challenge_clicks < MAX_CHALLENGE_CLICKS
+            && Instant::now() >= next_challenge_click_at
+        {            next_challenge_click_at = Instant::now() + Duration::from_millis(3_000);
+            challenge_clicks += 1;
+            // The cloudflarefix plugin solves interstitials in-process, where it
+            // has the real Page and can click the frame *element*. A coordinate
+            // click from out here never reaches the widget (it lives in a
+            // cross-origin child frame) and on some sites blocks for 28s in a
+            // native mouse move. So give the plugin the first pass, and only
+            // fall back to a coordinate click on later passes.
+            if challenge_clicks >= 2 {
+                if let Ok(Some(found)) = client.evaluate(&tab, CHALLENGE_TARGET_JS, 5_000) {
+                    let list = found.get("targets").and_then(J::as_arr)
+                        .or_else(|| found.as_arr());
+                    match list.and_then(|l| l.first()) {
+                        Some(first) => {
+                            if let (Some(x), Some(y)) = (
+                                first.get("x").and_then(J::as_num),
+                                first.get("y").and_then(J::as_num),
+                            ) {
+                                trace!("coordinate click {},{} ({:?})", x, y,
+                                       first.get("kind").and_then(J::as_str));
+                                match client.click(&tab, x as i64, y as i64) {
+                                    Ok(()) => { clicked = true; trace!("click ok"); }
+                                    Err(e) => trace!("click error: {}", e),
+                                }
+                            }
+                        }
+                        None => trace!("no clickable target; plugin owns this one"),
+                    }
+                }
+            } else {
+                trace!("pass 1: leaving the click to the cloudflarefix plugin");
+            }
+        } else if !on_challenge && click_attempts < MAX_CLICK_ATTEMPTS
+            && Instant::now() >= next_click_at
+            && mode != "challenge"
+        {
+            // --- embedded widget path (unchanged behaviour) ---
             next_click_at = Instant::now() + Duration::from_millis(4_000);
             click_attempts += 1;
             let _ = client.evaluate(&tab, WIDGET_SCROLL_JS, 5_000);
             sleep(Duration::from_millis(400));
-            if let Ok(Some(rect)) = client.evaluate(&tab, WIDGET_RECT_JS, 5_000) {
+            // Turnstile first (it has precise rects), then any other provider's
+            // widget. A page can carry only one captcha in practice, so the
+            // first hit is the right one.
+            let mut rect = None;
+            match client.evaluate(&tab, WIDGET_RECT_JS, 5_000) {
+                Ok(Some(v)) if v.get("x").is_some() => rect = Some(v),
+                Ok(_) => {}
+                Err(e) => trace!("widget: evaluate error: {}", e),
+            }
+            if rect.is_none() {
+                if let Ok(Some(v)) = client.evaluate(&tab, ANY_WIDGET_JS, 5_000) {
+                    let list = v.get("targets").and_then(J::as_arr);
+                    if let Some(first) = list.and_then(|l| l.first()) {
+                        if first.get("x").is_some() {
+                            trace!("other captcha widget: {:?}",
+                                   first.get("kind").and_then(J::as_str));
+                            rect = Some(first.clone());
+                        }
+                    }
+                }
+            }
+            if let Some(rect) = rect {
                 if let (Some(x), Some(y)) = (
                     rect.get("x").and_then(J::as_num),
                     rect.get("y").and_then(J::as_num),
                 ) {
+                    trace!("widget click {},{}", x, y);
                     if client.click(&tab, x as i64, y as i64).is_ok() { clicked = true; }
+                } else {
+                    trace!("widget: no rect");
                 }
+            } else {
+                trace!("widget: no result");
+            }
+        } else if !on_challenge && click_attempts >= MAX_CLICK_ATTEMPTS && exhausted_at.is_none() {
+            // Every click has been spent and no token has appeared. Clicking
+            // again cannot help, so stop after a short grace period rather than
+            // waiting out the caller's whole timeout.
+            exhausted_at = Some(Instant::now());
+        }
+        if let Some(at) = exhausted_at {
+            if at.elapsed().as_millis() as u64 >= CLICK_GRACE_MS {
+                trace!("click attempts exhausted; giving up early");
+                break;
             }
         }
         sleep(Duration::from_millis(350));
     }
     client.close(&tab);
 
+    // Final sweep: a challenge may clear right as we stop clicking.
+    if token.is_empty() && clearance.is_empty() && mode != "widget" {
+        if let Some(c) = client.clearance() { clearance = c; }
+    }
+
     let duration = t0.elapsed().as_millis() as u64;
-    let error = if token.is_empty() { Some("No token returned before timeout") } else { None };
+    let ok = !token.is_empty() || !clearance.is_empty();
+    let error = if ok {
+        None
+    } else if challenge_seen || mode == "challenge" {
+        Some("Cloudflare challenge did not clear before timeout")
+    } else if clicked {
+        // A widget was found and clicked, but its answer never appeared. That is
+        // the honest description for an image grid or a slider, whose answer
+        // does not exist in the DOM and cannot be produced from out here.
+        Some("captcha widget found and clicked, but it needs a human (image grid or slider)")
+    } else {
+        Some("No captcha token returned before timeout")
+    };
+    // Which provider answered. A token's kind comes from the field it was read
+    // from; a clearance is always Cloudflare's managed challenge.
+    let kind = if !token_kind.is_empty() {
+        token_kind.clone()
+    } else if !clearance.is_empty() {
+        "cf-managed".to_string()
+    } else {
+        String::new()
+    };
+    let result = if !token.is_empty() {
+        "token"
+    } else if !clearance.is_empty() {
+        "clearance"
+    } else {
+        "none"
+    };
     Ok(format!(
-        "{{\"token\":{},\"durationMs\":{},\"error\":{},\"method\":\"camofox-rust\",\"clicked\":{},\"url\":{}}}",
+        "{{\"token\":{},\"clearance\":{},\"result\":{},\"captcha\":{},\"challenge\":{},\"durationMs\":{},\"error\":{},\"method\":\"camofox-rust\",\"clicked\":{},\"url\":{}}}",
         if token.is_empty() { "null".into() } else { esc(&token) },
+        if clearance.is_empty() { "null".into() } else { esc(&clearance) },
+        esc(result),
+        if kind.is_empty() { "null".to_string() } else { esc(&kind) },
+        challenge_seen,
         duration,
         error.map(esc).unwrap_or_else(|| "null".into()),
         clicked,
@@ -534,6 +990,7 @@ fn solve(cfg: &J) -> Result<String, String> {
 }
 
 fn main() {
+    let t_start = Instant::now();
     let raw = env::args().nth(1).unwrap_or_default();
     let decoded = b64decode(&raw).unwrap_or_else(|| raw.clone());
     let cfg = match parse_json(&decoded) {
@@ -543,9 +1000,17 @@ fn main() {
             return;
         }
     };
+    let debug = cfg.get("debug").and_then(J::as_bool).unwrap_or(false);
+    if debug { eprintln!("[solve] cfg parsed at {}ms", t_start.elapsed().as_millis()); }
     fullscreen_desktop();
+    if debug { eprintln!("[solve] fullscreen done at {}ms", t_start.elapsed().as_millis()); }
     match solve(&cfg) {
-        Ok(line) => println!("{}", line),
+        Ok(line) => {
+            if debug { eprintln!("[solve] solve returned at {}ms", t_start.elapsed().as_millis()); }
+            println!("{}", line);
+            if debug { eprintln!("[solve] printed at {}ms", t_start.elapsed().as_millis()); }
+        }
         Err(e) => println!("{{\"token\":null,\"durationMs\":0,\"error\":{},\"method\":\"camofox-rust\"}}", esc(&format!("{}: {}", std::any::type_name::<String>(), e))),
     }
+    if debug { eprintln!("[solve] exiting at {}ms", t_start.elapsed().as_millis()); }
 }
