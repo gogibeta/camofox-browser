@@ -20,6 +20,7 @@ history; add a new line if a rule changes.
 - A benign site banner sits over a captcha checkbox and the plugin reports "needs a human" -> The click is intercepted by a site-wide panel (an incident report, a cookie bar), not by a puzzle. Check for a puzzle panel **first** (and `await` it -- an un-awaited DOM read returns a Promise, which is always truthy), then look for a real close control and retry.
 - `if (puzzlePanel(page))` is silently always true -> Any async helper returns a Promise; a Promise is truthy, so the branch fires every time. Every async predicate needs `await`, and a linter will not catch a conditional it is not configured for.
 - A deployed binary returns only `token` while the source clearly writes `result`/`captcha` -> The binary was built before the source changed. Rebuild from the uploaded source and print its SHA next to the local one; a stale build looks exactly like a code bug.
+- A solver reports "no captcha" on a page that visibly has one -> The widget is below the fold and the finder rejects off-screen elements. `scrollIntoView({block:'center'})` before measuring, then re-measure: FriendlyCaptcha's demo widget sits at y=2376 in a 372 px viewport. The plugin never hit this because Playwright's `frameElement().click()` scrolls by itself.
 
 ## Testing
 

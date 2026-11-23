@@ -496,12 +496,27 @@ const ANY_TOKEN_JS: &str = r#"(() => {
 // usually an obfuscated div.
 const ANY_WIDGET_JS: &str = r#"(() => {
   const out = [];
+  const measure = (el) => {
+    let r;
+    try { r = el.getBoundingClientRect(); } catch (_) { return null; }
+    if (!r || r.width < 20 || r.height < 15) return null;
+    return r;
+  };
   const push = (el, kind) => {
     if (!el) return;
-    let r;
-    try { r = el.getBoundingClientRect(); } catch (_) { return; }
-    if (!r || r.width < 20 || r.height < 15) return;
-    if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) return;
+    let r = measure(el);
+    if (!r) return;
+    // A widget below the fold is still a widget. A human scrolls to it; a
+    // solver that only looks at the viewport reports "no captcha" on a page
+    // that plainly has one. FriendlyCaptcha's demo widget sits at y=2376 in a
+    // 372px-tall window, which is exactly this case.
+    if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) {
+      try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) { return; }
+      r = measure(el);
+      if (!r) return;
+      // Still outside after scrolling: genuinely unreachable (a hidden frame).
+      if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) return;
+    }
     // A panel is a puzzle, not a checkbox. Clicking its corner is worse than
     // doing nothing.
     if (r.height >= 220 || (r.width >= 320 && r.height >= 180)) return;

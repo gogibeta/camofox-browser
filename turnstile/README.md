@@ -176,6 +176,13 @@ FriendlyCaptcha's strategy is `click` rather than `wait` — the widget is inert
 until it is clicked. Before that fix the plugin reported "captcha answered" in
 7 ms with zero clicks, which was simply false.
 
+**A widget below the fold is still a widget.** FriendlyCaptcha's demo widget sits
+at y=2376 in a 372 px-tall window. A solver that only inspects the viewport finds
+nothing, declines to click, and reports "no captcha" on a page that plainly has
+one — which is what the Rust engine did until it learned to `scrollIntoView` a
+candidate before measuring it. The plugin never had this bug for a different
+reason: Playwright's `frameElement().click()` scrolls on its own.
+
 ## Turnstile widgets vs Cloudflare Managed Challenges
 
 These are two different problems, and the kit handles both.
@@ -295,7 +302,7 @@ actually runs now; the Python column is the reference implementation.
 | demo.turnstile.workers.dev | Turnstile widget | — | token, 8.8 s |
 | free.nodaroo.com | Managed Challenge | cleared 4.9–8.9 s | clearance, 5.7–7.5 s |
 | glassdoor.com | Managed Challenge | cleared 2.4–8.2 s | clearance, 5.7–7.5 s |
-| friendlycaptcha.com/demo | FriendlyCaptcha | answered 7.3–9.6 s, 1 click | token, 6.4 KB, 9.6 s |
+| friendlycaptcha.com/demo | FriendlyCaptcha | answered 7.3–9.6 s, 1 click | token, 6421 chars, 12.8–15.4 s |
 | accounts.hcaptcha.com/demo | hCaptcha | clicked, then puzzle (5.4 s) | no token, reported at 27 s |
 | google.com/recaptcha/api2/demo | reCAPTCHA v2 | clicked, then puzzle (2.0 s) | no token, reported at 25 s |
 
@@ -313,11 +320,11 @@ solvegate (plugin)    answered 3.6 s
 hCaptcha (plugin)     clicked, then puzzle, reported 6.3 s
 reCAPTCHA v2 (plugin) clicked, then puzzle, reported 2.1 s
 friendlycaptcha       answered 7.3 s, 1 click
-nodaroo (solver)      clearance, 6.3 s, captcha=cf-managed
-glassdoor (solver)    clearance, 8.4 s, captcha=cf-managed
-solvegate (solver)    token, 666 chars, 6.1 s, captcha=turnstile
-100milionseek         token, 666 chars, 8.8 s, captcha=turnstile
-friendlycaptcha       token, 6433 chars, 9.6 s, captcha=friendlycaptcha
+nodaroo (solver)      clearance, 6.2 s, captcha=cf-managed
+glassdoor (solver)    clearance, 7.0 s, captcha=cf-managed
+solvegate (solver)    token, 645 chars, 6.1 s, captcha=turnstile
+100milionseek         token, 666 chars, 9.0 s, captcha=turnstile
+friendlycaptcha       token, 6421 chars, 12.8 s, captcha=friendlycaptcha
 hCaptcha (solver)     no token, reported at 28 s
 reCAPTCHA v2 (solver) no token, reported at 27 s
 ```
