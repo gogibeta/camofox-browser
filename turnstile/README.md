@@ -48,8 +48,15 @@ Install only, without starting the server:
 bash turnstile/install.sh --no-start
 ```
 
-Re-running is safe; it is idempotent, and it re-stages the solver so a re-install
-never keeps an old copy running.
+Re-running is safe; it is idempotent, and it recompiles the solver so a re-install
+never keeps an old binary running.
+
+If `turnstile/install.sh` is run from a checkout that is not at
+`/data/workspace/camofox-browser`, set `WS` and `REPO`:
+
+```bash
+WS=/data/workspace REPO=$PWD bash turnstile/install.sh
+```
 
 ## Solve from the command line
 
@@ -79,7 +86,7 @@ about it. There are three buckets:
 | Bucket | Captchas | What actually happens |
 | --- | --- | --- |
 | **Clears** | Turnstile, Cloudflare Managed Challenge | The plugin clicks the challenge frame in-process and it passes in 4–8 s. This is the part that is genuinely automated. |
-| **Self-solving** | FriendlyCaptcha (proof of work), reCAPTCHA v3 (invisible) | Nothing to click. They resolve on their own given a browser that does not look automated, and the plugin notices in ~20 ms. |
+| **Self-solving** | FriendlyCaptcha (proof of work), reCAPTCHA v3 (invisible) | Nothing to click. They resolve on their own given a browser that does not look automated, and the plugin notices within 1 s. |
 | **Reported, not solved** | hCaptcha checkbox, reCAPTCHA v2 checkbox, hCaptcha / reCAPTCHA v2 **image grids**, GeeTest sliders, Arkose FunCaptcha, AWS WAF, DataDome | The plugin finds and clicks the checkbox, and the provider then opens a puzzle. The answer to a puzzle is not in the DOM, so nothing browser-side can produce it. The plugin says so instead of clicking at tiles blindly. |
 
 The third row is the honest limit, and it was measured rather than assumed:
@@ -166,16 +173,14 @@ These are two different problems, and the kit handles both.
 | --- | --- | --- |
 | Page has `data-sitekey` | yes | **no** |
 | `.cf-turnstile` element | yes | **no** (0 found) |
-| `window.turnstile` | often defined | often defined too — **not a discriminator** |
+| `window.turnstile` | undefined on every site tested | undefined too — **no signal at all** |
 | Success signal | token in `cf-turnstile-response` | `cf_clearance` cookie only |
 | `_cf_chl_opt` | absent | present |
 
 The frame URLs are also identical: both load
 `challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/f/av0/rch/…`,
-so a frame URL cannot tell them apart either. The only reliable discriminator is
-the page itself — a `.cf-turnstile` container or `data-sitekey` means a widget,
-challenge-wording in the title means an interstitial — and the plugin asks the
-page which it is before it logs a `kind`.
+so a frame URL cannot tell them apart either. That is why the plugin decides from
+the page (see the `cloudflareKind` rules above) before it logs a `kind`.
 
 A managed challenge is not a widget, so a widget-targeted solver reports "no
 sitekey" and does nothing. It also is not solvable by clicking page
@@ -193,17 +198,13 @@ Two things had to be fixed, and both live in the `captchafix` plugin:
    appear, and it then clears in ~6 s. This one pref is the whole difference —
    verified by toggling it alone.
 2. **Coordinate clicks cannot solve it.** Clicking the frame *element* through
-   Playwright clears the challenge in ~1 s. So the plugin solves challenges
-   in-process, where it has the real `Page`, instead of going through the HTTP
-   `/click` route.
+   Playwright clears a widget in ~1 s and a managed challenge in ~3 s. So the
+   plugin solves challenges in-process, where it has the real `Page`, instead of
+   going through the HTTP `/click` route.
 
 The plugin watches `tab:created` and `tab:navigated`, and for any tab showing an
 interstitial or a captcha widget it polls for a token or a `cf_clearance` cookie,
 clicking the widget up to 5 times, 3 s apart, until one appears or 45 s elapse.
-
-It distinguishes a *widget* from an *interstitial* before logging a `kind`, since
-both load the same challenge frame. `window.turnstile` is not usable for that:
-each page ships its own definition, and it was undefined on all three test sites.
 
 The solver cooperates: it reports `challenge: true` and returns the
 `cf_clearance` value in a `clearance` field, so a caller does not have to know
@@ -283,13 +284,24 @@ actually runs now; the Python column is the reference implementation.
 | demo.turnstile.workers.dev | Turnstile widget | — | token, 8.8 s |
 | free.nodaroo.com | Managed Challenge | cleared 4.9–8.9 s | clearance, 5.7–7.5 s |
 | glassdoor.com | Managed Challenge | cleared 2.4–8.2 s | clearance, 5.7–7.5 s |
-| friendlycaptcha.com/demo | FriendlyCaptcha | answered 20 ms, 0 clicks | token, 6.3–6.5 s |
+| friendlycaptcha.com/demo | FriendlyCaptcha | answered 0.1–2.4 s, 0 clicks | token, 6.3–6.5 s |
 | accounts.hcaptcha.com/demo | hCaptcha | clicked, then puzzle (5.4 s) | no token, reported at 27 s |
 | google.com/recaptcha/api2/demo | reCAPTCHA v2 | clicked, then puzzle (2.0 s) | no token, reported at 25 s |
 
 Every Cloudflare row was measured with a **fresh `userId`** per run, so no
 persisted cookie could make a pass look real. The two puzzle rows are expected
 outcomes, not regressions: those demo widgets challenge every visitor.
+
+Last full run against the committed code:
+
+```
+nodaroo (plugin)      cleared 7.4 s
+glassdoor (plugin)    cleared 7.6 s
+nodaroo (solver)      clearance, 455 chars, 6.0 s, captcha=cf-managed
+solvegate (solver)    token, 645 chars, 6.0 s, captcha=turnstile
+100milionseek         token, 666 chars, 8.1 s, captcha=turnstile
+friendlycaptcha       answered 2.4 s, 0 clicks
+```
 
 Fresh-install measurement on a wiped VM: **5/5 on solvegate at 8.1–8.4 s**, and the
 extension end to end at **11.3 s** and **12.3 s** on two real targets.
