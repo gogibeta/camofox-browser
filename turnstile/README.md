@@ -303,8 +303,20 @@ solvegate (solver)    token, 645 chars, 6.0 s, captcha=turnstile
 friendlycaptcha       answered 2.4 s, 0 clicks
 ```
 
-Fresh-install measurement on a wiped VM: **5/5 on solvegate at 8.1–8.4 s**, and the
-extension end to end at **11.3 s** and **12.3 s** on two real targets.
+Fresh-install measurement on a wiped VM: **5/5 on solvegate at 8.1–8.4 s**.
+
+Extension end to end, MV3 loaded unpacked in a headed Chromium, against the
+committed extension:
+
+```
+100milionseek  OK 14.3 s   browser-up 0.5s, page-loaded 2.1s, answered 14.3s
+solvegate      OK 10.0 s   browser-up 0.5s, page-loaded 0.9s, answered 10.0s
+```
+
+`vm_ext_test.py` prints that `TIMELINE`, so a slow run can be attributed instead
+of guessed at. The first run against a cold box once took 42 s; it was the VM
+exec call being cold, not the extension (the same run a minute later was 10 s).
+Run it twice before believing a slow number.
 
 Per-solve Cloudflare time is identical (~6–9 s) in both languages. Rust wins on
 wall time because it reuses one keep-alive HTTP connection to camofox-browser
@@ -345,6 +357,11 @@ key. The key lives in extension storage and is never in the source.
 Verify end to end on the VM:
 
 ```bash
-python3 /data/workspace/vm_ext_test.py test   # expects XXXX.DUMMY.TOKEN.XXXX
-python3 /data/workspace/vm_ext_test.py real   # expects a real token
+python3 /data/workspace/vm_ext_test.py real     # 100milionseek, real token
+python3 /data/workspace/vm_ext_test.py second   # solvegate, real token
 ```
+
+It prints `RESULT ... OK`, the answering provider as `CAPTCHA_KIND`, and a
+`TIMELINE` of browser-up / config-set / page-loaded / answered. It needs a
+Playwright Chromium (`playwright install chromium`), which it locates by glob
+rather than by a hardcoded build number; `CHROME_PATH` overrides it.
