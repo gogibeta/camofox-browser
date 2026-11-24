@@ -188,14 +188,23 @@ say "[6/10] plugin dependencies (apt.txt + post-install.sh of every enabled plug
 # Nothing used to install it on a VM, so the plugin loaded, logged a warning, and
 # every transcript request silently took the slow browser fallback.
 if [ -f "$REPO/scripts/install-plugin-deps.sh" ]; then
+  # The variables are passed through `env` because the hooks write to
+  # /usr/local/bin and therefore have to run under sudo, and `sudo` scrubs the
+  # caller's environment by default. A plain `VAR=x sh script` prefix is lost the
+  # moment the command is wrapped in $SUDO -- which is exactly how the first
+  # version of this ended up reporting "no plugins dir at /app/plugins".
+  PLUGIN_DEPS_OK=1
   if [ "$NO_DEPS" = "1" ] || ! have_root; then
-    warn "skipping plugin apt/hook install (--no-deps or no root); running hooks as the current user"
-    REPO_DIR="$REPO" SUDO="" CAMOFOX_DEPS_APT=0 \
-      sh "$REPO/scripts/install-plugin-deps.sh" || warn "plugin dependency install reported a failure"
+    warn "skipping apt (--no-deps or no root); still running the post-install hooks"
+    # shellcheck disable=SC2086
+    $SUDO env REPO_DIR="$REPO" SUDO="" CAMOFOX_DEPS_APT=0 \
+      sh "$REPO/scripts/install-plugin-deps.sh" || PLUGIN_DEPS_OK=0
   else
-    REPO_DIR="$REPO" SUDO="$SUDO" CAMOFOX_DEPS_APT=1 \
-      $SUDO sh "$REPO/scripts/install-plugin-deps.sh" || warn "plugin dependency install reported a failure"
+    # shellcheck disable=SC2086
+    $SUDO env REPO_DIR="$REPO" SUDO="" CAMOFOX_DEPS_APT=1 \
+      sh "$REPO/scripts/install-plugin-deps.sh" || PLUGIN_DEPS_OK=0
   fi
+  [ "$PLUGIN_DEPS_OK" = "1" ] || warn "a plugin dependency step failed (see above)"
 else
   warn "scripts/install-plugin-deps.sh is missing; plugin dependencies were not installed"
 fi
