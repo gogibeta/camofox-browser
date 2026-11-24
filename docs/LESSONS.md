@@ -51,6 +51,17 @@ history; add a new line if a rule changes.
 - A plugin enabled but its dep absent (`yt-dlp`) -> the plugin loads and
   degrades silently. `scripts/install-plugin-deps.sh` must run on the VM, not
   only in Docker.
+- A no-op default is a policy, not a default -> upstream had telemetry on with a
+  hardcoded third-party endpoint (`crashReportEnabled !== false`, so a caller that
+  forgot the flag got telemetry). A fork that says "self-hosted" cannot inherit
+  that. Make it `=== true`, remove the default URL, and assert "sends nothing
+  without a URL" in the tests, or the next refactor quietly restores it.
+- A doctor check that looks in the wrong place is worse than no check -> it
+  warned "ext-config.json is absent" on installs where the key had just been
+  seeded, because install.sh writes `config.json` into each staged extension
+  build while doctor looked for a workspace-level file. Verify the artifact the
+  runtime actually reads (the one beside `background.js`), or you teach people to
+  ignore warnings.
 
 ## Extension
 
