@@ -114,7 +114,9 @@ fi
 
 echo
 echo "extension"
-for dir in "$WS/turnstile-ext" "$WS/turnstile-ext-firefox"; do
+CHROME_EXT_DIR="$WS/turnstile-ext"
+FIREFOX_EXT_DIR="$WS/turnstile-ext-firefox"
+for dir in "$CHROME_EXT_DIR" "$FIREFOX_EXT_DIR"; do
   if [ -f "$dir/manifest.json" ]; then
     VER=$(node -e 'try{console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).manifest_version)}catch(e){console.log("?")}' "$dir/manifest.json" 2>/dev/null || echo "?")
     ok "$dir (manifest v$VER)"
@@ -124,9 +126,9 @@ for dir in "$WS/turnstile-ext" "$WS/turnstile-ext-firefox"; do
 done
 # The MV3 staged copy must not be the MM2 manifest and vice versa: a Firefox
 # build pointed at an MV3 manifest refuses to load with no useful error.
-if [ -f "$WS/turnstile-ext/manifest.json" ] && [ -f "$WS/turnstile-ext-firefox/manifest.json" ]; then
-  A=$(node -e 'try{console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).manifest_version)}catch(e){}' "$WS/turnstile-ext/manifest.json" 2>/dev/null)
-  B=$(node -e 'try{console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).manifest_version)}catch(e){}' "$WS/turnstile-ext-firefox/manifest.json" 2>/dev/null)
+if [ -f "$CHROME_EXT_DIR/manifest.json" ] && [ -f "$FIREFOX_EXT_DIR/manifest.json" ]; then
+  A=$(node -e 'try{console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).manifest_version)}catch(e){}' "$CHROME_EXT_DIR/manifest.json" 2>/dev/null)
+  B=$(node -e 'try{console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).manifest_version)}catch(e){}' "$FIREFOX_EXT_DIR/manifest.json" 2>/dev/null)
   if [ "$A" = "3" ] && [ "$B" = "2" ]; then
     ok "chromium copy is MV3, firefox copy is MV2"
   else
@@ -144,8 +146,34 @@ if [ -f "$WS/ext-config.json" ]; then
   else
     warn "ext-config.json is incomplete (the popup can also set these)"
   fi
-else
-  warn "$WS/ext-config.json is absent; set the InstaBox key in the extension popup"
+fi
+
+# The file that actually matters is the one inside each staged build: that is
+# what background.js fetches at load time. Checking only the workspace-level
+# ext-config.json gave a false "absent" warning on a correctly seeded install,
+# because install.sh writes config.json into the builds, not beside them.
+SEEDED=0
+for dir in "$CHROME_EXT_DIR" "$FIREFOX_EXT_DIR"; do
+  [ -f "$dir/config.json" ] || continue
+  SEEDED=$((SEEDED + 1))
+  if node -e '
+      const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      if (!c.instaboxApiKey) throw new Error("instaboxApiKey is empty");
+      if (!c.instaboxMachineId) throw new Error("instaboxMachineId is empty");
+      if (!c.solverPath) throw new Error("solverPath is empty");
+      if (c.solverPython) throw new Error("solverPython is set but the engine is a native binary");
+      // A CR here breaks fetch() while still looking configured.
+      for (const [k, v] of Object.entries(c)) {
+        if (typeof v === "string" && /[\r\n]/.test(v)) throw new Error(`${k} contains a CR or LF`);
+      }
+    ' "$dir/config.json" 2>/dev/null; then
+    ok "$(basename "$dir")/config.json is seeded, CR-free, and points at the Rust binary"
+  else
+    warn "$(basename "$dir")/config.json is incomplete or contains a CR"
+  fi
+done
+if [ "$SEEDED" -eq 0 ] && [ ! -f "$WS/ext-config.json" ]; then
+  warn "no seeded extension config; set the InstaBox key in the extension popup"
 fi
 
 echo
