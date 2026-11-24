@@ -40,7 +40,7 @@ history; add a new line if a rule changes.
 - Config lost `vnc` / `interactive.mode` reset to `off` after a re-deploy ->
   never `cat >` a config file. Merge it (`scripts/merge-camofox-config.mjs`).
   `interactive.mode` decides whether a challenge click lands.
-- `xtool`/`xdotool` missing is silent -> the solver raises and sizes the
+- `xdotool` missing is silent -> the solver raises and sizes the
   Camoufox window before clicking, because a background window swallows the OS
   pointer event. `plugins/captchafix/apt.txt` declares it.
 - A plugin enabled but its dep absent (`yt-dlp`) -> the plugin loads and
