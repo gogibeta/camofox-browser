@@ -28,3 +28,34 @@ history; add a new line if a rule changes.
 - A Turnstile widget page is probed for `cf_clearance` and reported as failed -> A widget sets no `cf_clearance`; it answers with a token. Check both signals: a cookie *or* a populated response field.
 - Plugin edits have no effect on the running server -> Plugin modules are loaded at startup. Restart the server after changing a plugin file.
 - Prose in a repo file shows mangled dashes and quotes after an edit -> A PowerShell `Get-Content`/`Set-Content` round-trip goes through cp1252 and re-encodes UTF-8, and may prepend a BOM. Edit UTF-8 files with the edit/write tools or Python, and check for the cp1252 lead bytes before committing.
+
+## Install path
+
+- Wiped box, one command, still "ready" but nothing solved -> NEVER trust a
+  health check alone. `captchafix OK` in the install log is the only proof the
+  plugin loaded; a healthy server without it clears nothing.
+- `install-plugin-deps` logged `no plugins dir at /app/plugins` on a VM ->
+  `sudo` scrubs the caller's environment, so `VAR=x sudo sh script` loses the
+  VAR. Pass it as `sudo env VAR=x sh script`.
+- Config lost `vnc` / `interactive.mode` reset to `off` after a re-deploy ->
+  never `cat >` a config file. Merge it (`scripts/merge-camofox-config.mjs`).
+  `interactive.mode` decides whether a challenge click lands.
+- `xtool`/`xdotool` missing is silent -> the solver raises and sizes the
+  Camoufox window before clicking, because a background window swallows the OS
+  pointer event. `plugins/captchafix/apt.txt` declares it.
+- A plugin enabled but its dep absent (`yt-dlp`) -> the plugin loads and
+  degrades silently. `scripts/install-plugin-deps.sh` must run on the VM, not
+  only in Docker.
+
+## Extension
+
+- `instaboxMachineId` ended with `\r` -> `fetch()` rejected the URL while the
+  popup looked configured. Strip `[\r\n]` from every string config value on
+  both the writer (install.sh) and the reader (`cleanValue` in background.js).
+- `/tabs/:id/evaluate` with a bare arrow function returns `undefined` ->
+  it takes an *expression*. Wrap probes in an IIFE.
+- `page.evaluate` cannot see content-script globals -> content scripts run in
+  an isolated world, so `window.__turnstileAutoSolverLoaded` is always false
+  from the page. Verify through the DOM field or the extension's own message.
+- Apify kit's `extension/` drifted 143 lines from the fork -> keep it
+  byte-identical; two copies of a solver solve differently.
