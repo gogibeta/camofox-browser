@@ -630,8 +630,6 @@ const CHALLENGE_TARGET_JS: &str = r#"(() => {
 // ---------- solver ----------
 
 struct Client {
-    host: String,
-    port: u16,
     uid: String,
     conn: std::cell::RefCell<Option<Conn>>,
     addr: SocketAddr,
@@ -650,7 +648,6 @@ impl Client {
         let addr = (host.as_str(), port).to_socket_addrs().map_err(|e| e.to_string())?
             .next().ok_or_else(|| "no address".to_string())?;
         Ok(Self {
-            host, port,
             uid: format!("solve-{}", std::process::id()),
             conn: std::cell::RefCell::new(None),
             addr,
