@@ -83,6 +83,22 @@ if [ -f "$CFG" ]; then
   else
     bad "camofox.config.json is not in a solvable state (see above)"
   fi
+  # "desktop" versus "off" decides whether a challenge click lands: the solver
+  # raises a real OS window before clicking, and a headless window swallows the
+  # pointer event. The installer passes CAMOFOX_INTERACTIVE=desktop to the server,
+  # but the file is the fallback, and a `git reset --hard` restores the committed
+  # value -- so check the file too rather than trusting the launch environment.
+  MODE=$(node -e '
+    try {
+      const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      process.stdout.write(String(c.interactive?.mode || "off"));
+    } catch { process.stdout.write("unreadable"); }
+  ' "$CFG")
+  case "$MODE" in
+    desktop) ok "interactive.mode is desktop (challenge clicks can land)" ;;
+    off)     warn "interactive.mode is off; fine only if CAMOFOX_INTERACTIVE=desktop is set for the server" ;;
+    *)       bad "interactive.mode is '$MODE' (expected desktop or off)" ;;
+  esac
 else
   bad "$CFG is missing"
 fi
@@ -178,6 +194,16 @@ if [ "$CHECK_SERVER" = "1" ]; then
     if grep -q 'yt-dlp not found' "$LOG"; then
       warn "the log records a missing yt-dlp from a previous start"
     fi
+    # The file's mode is a fallback; this is the value the launch actually used.
+    # A server started with CAMOFOX_INTERACTIVE=off cannot land a challenge click,
+    # and nothing else in the log says so plainly.
+    LAUNCH_MODE=$(grep -o '"interactiveMode":"[a-z]*"' "$LOG" | tail -1 | sed 's/.*:"//;s/"$//')
+    case "${LAUNCH_MODE:-}" in
+      desktop) ok "server launched in desktop mode" ;;
+      off)     bad "server launched with interactiveMode=off; a managed-challenge click cannot land" ;;
+      '')      : ;;  # no launch recorded yet; the file check above stands in
+      *)       warn "server launched with an unexpected interactiveMode=$LAUNCH_MODE" ;;
+    esac
   else
     warn "$LOG does not exist; the server may not have been started by install.sh"
   fi
