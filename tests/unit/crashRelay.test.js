@@ -40,14 +40,28 @@ afterEach(() => {
 // ============================================================================
 
 describe('sendToRelay', () => {
+  // This fork ships no default endpoint, so a relay URL has to be configured
+  // before anything is sent. Each test sets one, since the module-level URL is
+  // what sendToRelay reads.
+  beforeEach(() => {
+    createReporter({ crashReportEnabled: true, crashReportUrl: 'https://relay.test/report' });
+  });
 
   test('sends POST with JSON Content-Type', async () => {
     await sendToRelay({ type: 'crash', signature: 'aabb1122', title: 'test', body: 'body', labels: ['crash'] });
     expect(fetchCalls).toHaveLength(1);
     const { url, opts } = fetchCalls[0];
-    expect(url).toContain('camofox-telemetry.askjo.workers.dev/report');
+    expect(url).toContain('relay.test/report');
     expect(opts.method).toBe('POST');
     expect(opts.headers['Content-Type']).toBe('application/json');
+  });
+
+  // The privacy guarantee: an unconfigured install must not phone anywhere.
+  test('sends nothing when no relay URL is configured', async () => {
+    createReporter({ crashReportEnabled: true, crashReportUrl: '' });
+    const sent = await sendToRelay({ type: 'crash', signature: 'x', title: 't', body: 'b', labels: [] });
+    expect(sent).toBe(false);
+    expect(fetchCalls).toHaveLength(0);
   });
 
   test('sends correct payload shape', async () => {
@@ -106,6 +120,12 @@ describe('sendToRelay', () => {
 
 describe('sendToRelay security', () => {
 
+  // A relay URL must be configured or sendToRelay refuses to send at all, which
+  // would make these assertions vacuous.
+  beforeEach(() => {
+    createReporter({ crashReportEnabled: true, crashReportUrl: 'https://relay.test/report' });
+  });
+
   test('payload never contains GitHub App credentials', async () => {
     const payload = {
       type: 'crash',
@@ -134,7 +154,7 @@ describe('sendToRelay security', () => {
 describe('createReporter relay integration', () => {
 
   test('reportCrash sends to relay with correct type and labels', async () => {
-    const reporter = createReporter({ crashReportEnabled: true, version: '1.8.2' });
+    const reporter = createReporter({ crashReportEnabled: true, crashReportUrl: 'https://relay.test/report', version: '1.8.2' });
     await reporter.reportCrash(new Error('test error'));
     // Wait for the async in-flight promise
     await reporter.stop();
@@ -149,7 +169,7 @@ describe('createReporter relay integration', () => {
   });
 
   test('reportCrash with signal sends signal:TYPE', async () => {
-    const reporter = createReporter({ crashReportEnabled: true, version: '1.8.2' });
+    const reporter = createReporter({ crashReportEnabled: true, crashReportUrl: 'https://relay.test/report', version: '1.8.2' });
     await reporter.reportCrash(new Error('killed'), { signal: 'SIGTERM' });
     await reporter.stop();
     expect(fetchCalls.length).toBeGreaterThanOrEqual(1);
@@ -158,7 +178,7 @@ describe('createReporter relay integration', () => {
   });
 
   test('reportHang sends hang:operation type', async () => {
-    const reporter = createReporter({ crashReportEnabled: true, version: '1.8.2' });
+    const reporter = createReporter({ crashReportEnabled: true, crashReportUrl: 'https://relay.test/report', version: '1.8.2' });
     await reporter.reportHang('navigate', 30000);
     await reporter.stop();
     expect(fetchCalls.length).toBeGreaterThanOrEqual(1);
@@ -168,7 +188,7 @@ describe('createReporter relay integration', () => {
   });
 
   test('reportStuckLoop sends stuck:tab-lock type', async () => {
-    const reporter = createReporter({ crashReportEnabled: true, version: '1.8.2' });
+    const reporter = createReporter({ crashReportEnabled: true, crashReportUrl: 'https://relay.test/report', version: '1.8.2' });
     await reporter.reportStuckLoop(60000);
     await reporter.stop();
     expect(fetchCalls.length).toBeGreaterThanOrEqual(1);
@@ -178,7 +198,7 @@ describe('createReporter relay integration', () => {
   });
 
   test('body contains anonymized content', async () => {
-    const reporter = createReporter({ crashReportEnabled: true });
+    const reporter = createReporter({ crashReportEnabled: true, crashReportUrl: 'https://relay.test/report' });
     const err = new Error('Failed connecting to https://secret.internal.corp/api');
     await reporter.reportCrash(err);
     await reporter.stop();
@@ -195,7 +215,7 @@ describe('createReporter relay integration', () => {
   });
 
   test('rate limiter prevents excess reports', async () => {
-    const reporter = createReporter({ crashReportEnabled: true, crashReportRateLimit: 2 });
+    const reporter = createReporter({ crashReportEnabled: true, crashReportUrl: 'https://relay.test/report', crashReportRateLimit: 2 });
     // Exhaust the crash-specific rate limiter (5/hr default)
     const rl = reporter._rateLimiter.crash;
     for (let i = 0; i < 5; i++) rl.tryAcquire();
@@ -212,11 +232,12 @@ describe('createReporter relay integration', () => {
 
 describe('relay URL override', () => {
 
-  test('default URL is camofox-telemetry.askjo.workers.dev', async () => {
+  test('ships with no endpoint, so nothing is sent by default', async () => {
     createReporter({ crashReportEnabled: true });
     // sendToRelay uses the module-level _relayUrl set by createReporter
-    await sendToRelay({ type: 'crash', signature: '11223344', title: 't', body: 'b', labels: [] });
-    expect(fetchCalls[0].url).toBe('https://camofox-telemetry.askjo.workers.dev/report');
+    const sent = await sendToRelay({ type: 'crash', signature: '11223344', title: 't', body: 'b', labels: [] });
+    expect(sent).toBe(false);
+    expect(fetchCalls).toHaveLength(0);
   });
 
   test('custom URL via config.crashReportUrl', async () => {
@@ -225,10 +246,11 @@ describe('relay URL override', () => {
     expect(fetchCalls[0].url).toBe('https://my-relay.example.com/report');
   });
 
-  test('empty crashReportUrl falls back to default', async () => {
+  test('empty crashReportUrl does not fall back to upstream', async () => {
     createReporter({ crashReportEnabled: true, crashReportUrl: '' });
-    await sendToRelay({ type: 'crash', signature: '11223344', title: 't', body: 'b', labels: [] });
-    expect(fetchCalls[0].url).toBe('https://camofox-telemetry.askjo.workers.dev/report');
+    const sent = await sendToRelay({ type: 'crash', signature: '11223344', title: 't', body: 'b', labels: [] });
+    expect(sent).toBe(false);
+    expect(fetchCalls).toHaveLength(0);
   });
 });
 

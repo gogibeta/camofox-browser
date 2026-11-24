@@ -1012,7 +1012,13 @@ describe('native memory leak detection', () => {
   });
 
   function createTestReporter(getContext = () => ({ resourceOpts: { sessionCount: 1 } })) {
-    const reporter = createReporter({ crashReportEnabled: true, crashReportRateLimit: 50 });
+    // A relay URL is required: this fork sends nothing without one, so the leak
+    // assertions below would all see zero requests otherwise.
+    const reporter = createReporter({
+      crashReportEnabled: true,
+      crashReportUrl: 'https://relay.test/report',
+      crashReportRateLimit: 50,
+    });
     reporter.startWatchdog(5000, getContext);
     started.push(reporter);
     return reporter;

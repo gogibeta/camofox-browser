@@ -55,13 +55,13 @@
       },
       "crashReportEnabled": {
         "type": "boolean",
-        "description": "Enable anonymized crash/hang telemetry. Set false to disable all outbound telemetry.",
-        "default": true
+        "description": "Enable anonymized crash/hang telemetry. Off by default; nothing is sent unless a URL is also set.",
+        "default": false
       },
       "crashReportUrl": {
         "type": "string",
-        "description": "Telemetry endpoint URL. Override to point to a self-hosted endpoint. Set via CAMOFOX_CRASH_REPORT_URL env var.",
-        "default": "https://camofox-telemetry.askjo.workers.dev/report"
+        "description": "Telemetry endpoint URL. Required for telemetry: this fork ships no default, so reports go nowhere until you point this at your own collector. Set via CAMOFOX_CRASH_REPORT_URL env var.",
+        "default": ""
       }
     },
     "additionalProperties": false
@@ -111,7 +111,7 @@
     },
     "crashReportUrl": {
       "label": "Telemetry Endpoint URL",
-      "placeholder": "https://camofox-telemetry.askjo.workers.dev/report"
+      "placeholder": "https://your-own-collector.example.com/report"
     }
   },
   "contracts": {

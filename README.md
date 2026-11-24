@@ -1,12 +1,10 @@
 <div align="center">
   <img src="fox.png" alt="camofox-browser" width="200" />
   <h1>camofox-browser</h1>
-  <p><strong>Anti-detection browser server for AI agents, powered by Camoufox</strong></p>
+  <p><strong>Anti-detection browser server for AI agents, with captcha solving built in</strong></p>
   <p>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
-    <a href="https://github.com/jo-inc/camofox-browser/stargazers"><img src="https://img.shields.io/github/stars/jo-inc/camofox-browser" alt="GitHub stars" /></a>
-    <a href="https://www.npmjs.com/package/camofox-browser"><img src="https://img.shields.io/npm/v/camofox-browser" alt="npm version" /></a>
-    <a href="https://github.com/jo-inc/camofox-browser/commits"><img src="https://img.shields.io/github/last-commit/jo-inc/camofox-browser" alt="GitHub last commit" /></a>
+    <a href="https://github.com/gogibeta/camofox-browser/commits"><img src="https://img.shields.io/github/last-commit/gogibeta/camofox-browser" alt="GitHub last commit" /></a>
   </p>
   <p>
     Standing on the mighty shoulders of <a href="https://camoufox.com">Camoufox</a> - a Firefox fork with fingerprint spoofing at the C++ level.
@@ -15,23 +13,22 @@
 
 <br/>
 
-> <a href="https://askjo.ai?ref=camofox"><img src="jo-logo.png" alt="Jo" width="80" height="80" align="left" /></a>
->
-> Built by the team behind <a href="https://askjo.ai?ref=camofox"><strong>jo, a personal AI agent</strong></a> that runs half on your Mac, half on a dedicated cloud machine just for you -- with zero maintenance needed. Available on macOS, Telegram, WhatsApp, and email. <a href="https://askjo.ai?ref=camofox">Try the beta free -></a>
-
-> <a href="https://x.com/pradeep24"><img src="pradeep-profile.png" alt="Pradeep Elankumaran" width="80" height="80" align="left" /></a>
->
-> <a href="https://x.com/pradeep24"><strong>Pradeep Elankumaran (@pradeep24)</strong></a> — co-founder and technical CEO at Jo.
->
-> <br clear="left" />
-
-<br/>
+A fork of [camofox-browser](https://github.com/jo-inc/camofox-browser) that adds a
+captcha-solving kit: a `captchafix` plugin that clears Cloudflare challenges and
+click-through widgets **inside the browser process**, a std-only Rust solver, and a
+Chrome/Firefox extension. Self-hosted. No captcha API, no third-party solver
+service, no per-solve fee.
 
 ```bash
-git clone https://github.com/jo-inc/camofox-browser && cd camofox-browser
-npm install && npm start
-# -> http://localhost:9377
+git clone https://github.com/gogibeta/camofox-browser && cd camofox-browser
+bash turnstile/install.sh
+# -> installs everything, starts a headed server, prints "RESULT: ready"
 ```
+
+That one command installs node dependencies, the system packages the solver needs,
+a Rust toolchain if absent, every enabled plugin's dependencies, both extension
+builds, and the compiled solver — then starts the server and **proves** the plugin
+loaded. See [Captcha solving](#captcha-solving).
 
 ---
 
@@ -43,9 +40,14 @@ Camoufox patches Firefox at the **C++ implementation level** - `navigator.hardwa
 
 This project wraps that engine in a REST API built for agents: accessibility snapshots instead of bloated HTML, stable element refs for clicking, and search macros for common sites.
 
+On top of that, this fork makes the browser able to **get past the captcha that
+is still there** — because anti-detection stops you being flagged, it does not
+answer a challenge that has already been issued.
+
 ## Features
 
 - **C++ Anti-Detection** - bypasses Google, Cloudflare, and most bot detection
+- **Captcha Solving** - clears Cloudflare Turnstile and Managed Challenges, plus FriendlyCaptcha, in-process. See [Captcha solving](#captcha-solving)
 - **Element Refs** - stable `e1`, `e2`, `e3` identifiers for reliable interaction
 - **Token-Efficient** - accessibility snapshots are ~90% smaller than raw HTML
 - **Runs on Anything** - lazy browser launch + idle shutdown keeps memory at ~40MB when idle. Designed to share a box with the rest of your stack -- Raspberry Pi, $5 VPS, shared infra.
@@ -65,52 +67,70 @@ This project wraps that engine in a REST API built for agents: accessibility sna
 - **OpenAPI Docs** - auto-generated spec at [`/openapi.json`](http://localhost:9377/openapi.json) and interactive docs at [`/docs`](http://localhost:9377/docs)
 - **Structured Extract** - `POST /tabs/:tabId/extract` with a JSON Schema that maps properties to snapshot refs via `x-ref`
 - **Session Tracing** - opt-in per-session Playwright trace capture (screenshots + DOM snapshots + network) with API endpoints to list, fetch, and delete trace zips
-- **Telemetry** - automatic [anonymized crash/hang telemetry](lib/reporter.js#L28-L290) via GitHub Issues. Identifies which sites cause failures and common failure patterns. Private domains are HMAC-hashed, paths/params stripped, tokens/IPs redacted. Opt-out with `CAMOFOX_CRASH_REPORT_ENABLED=false`.
+- **Telemetry** - [anonymized crash/hang telemetry](lib/reporter.js#L28-L290) via GitHub Issues, **off by default with no default endpoint**. Private domains are HMAC-hashed, paths/params stripped, tokens/IPs redacted. Turn on with `CAMOFOX_CRASH_REPORT_ENABLED=true` and point it at your own collector with `CAMOFOX_CRASH_REPORT_URL`.
 
 ## Optional Dependencies
 
 | Dependency | Purpose | Install |
 |-----------|---------|---------|
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | YouTube transcript extraction (fast path) | `pip install yt-dlp` or `brew install yt-dlp` |
+| `xdotool`, `Xvfb` | Required by the solver: a challenge click is a real OS pointer event | installed by `bash turnstile/install.sh` |
 
-The Docker image includes yt-dlp. For local dev, install it for the `/youtube/transcript` endpoint. Without it, the endpoint falls back to a slower browser-based method.
+`bash turnstile/install.sh` installs all three for you. The Docker image includes
+yt-dlp. Without yt-dlp the `/youtube/transcript` endpoint falls back to a slower
+browser-based method; without `xdotool` a Managed Challenge click is swallowed by
+a background window and quietly misses.
 
-## Quick Start
+## Install
 
-### OpenClaw Plugin
-
-```bash
-openclaw plugins install @askjo/camofox-browser
-```
-
-**Full HTTP ↔ agent-tool parity.** Every browser action Camofox exposes over HTTP is also a first-class MCP / OpenClaw tool, defined once in a single shared contract (`mcp/lib/tool-contracts.mjs`) so the two front doors can never drift. A build-time parity gate (`tests/unit/mcpHttpParity.test.js`) fails if a new browser action is added to the HTTP API without a matching tool. There are **31 tools**:
-
-**Tabs & navigation:** `camofox_create_tab` | `camofox_list_tabs` | `camofox_close_tab` | `camofox_activate` | `camofox_navigate` | `camofox_back` | `camofox_forward` | `camofox_refresh` | `camofox_wait`
-
-**Reading the page:** `camofox_snapshot` | `camofox_ax` | `camofox_actionables` | `camofox_table_rows` | `camofox_links` | `camofox_images` | `camofox_extract` | `camofox_screenshot`
-
-**Interacting:** `camofox_click` | `camofox_type` | `camofox_press` | `camofox_select` | `camofox_scroll` | `camofox_mouse_wheel` | `camofox_drag` | `camofox_upload` | `camofox_viewport`
-
-**Scripting & state:** `camofox_evaluate` | `camofox_init_script` | `camofox_import_cookies` | `camofox_export_storage_state` | `camofox_import_local_storage`
-
-### Standalone
-
-Run from npm:
+### The kit installer (recommended)
 
 ```bash
-npx @askjo/camofox-browser
-```
-
-Or from source:
-
-```bash
-git clone https://github.com/jo-inc/camofox-browser
+git clone https://github.com/gogibeta/camofox-browser
 cd camofox-browser
-npm install
-npm start  # downloads Camoufox on first run (~300MB)
+bash turnstile/install.sh
 ```
 
-Default port is `9377`. See [Environment Variables](#environment-variables) for all options.
+It installs, with no manual follow-up:
+
+1. `xvfb` and `xdotool` — the virtual display, and the OS window activation the solver needs before it clicks
+2. a Rust toolchain if there is none — distro package first, rustup as a fallback
+3. node dependencies (`npm ci`)
+4. **merges** `camofox.config.json` rather than overwriting it
+5. every enabled plugin's `apt.txt` and `post-install.sh` — this is what puts the pinned `yt-dlp` on the box
+6. both extension builds (`turnstile-ext` for Chrome MV3, `turnstile-ext-firefox` for Firefox MV2), with the InstaBox key seeded into each build's `config.json`
+7. the Rust solver, compiled from source and smoke-tested
+8. a headed server on `127.0.0.1:9377`, gated on `/health` **and** on `captchafix` actually having logged a load
+9. `turnstile/doctor.sh`, which exits non-zero if anything is still missing
+
+Flags: `--no-start` (install only), `--no-deps` (skip apt), `--no-rust` (never bootstrap a toolchain).
+
+Re-running is safe and fast: apt is only asked for missing packages, the plugin
+hooks are idempotent (a pinned `yt-dlp` is checksum-verified, not re-downloaded),
+and the solver is always recompiled so an old binary never keeps running.
+
+### Is it ready?
+
+```bash
+bash turnstile/doctor.sh
+```
+
+It checks everything a solve silently depends on — `Xvfb`, `xdotool`, the solver
+(by running it), a captchafix-enabled config, the `interactive.mode` the server
+actually launched with, both extension manifests, the seeded extension config,
+`yt-dlp`, `/health`, and whether `captchafix` logged a load. It prints
+`RESULT: ready` and exits 0, or lists the problems and exits 1.
+
+### Plain server, no captcha kit
+
+If you only want the upstream browser server:
+
+```bash
+npm install
+npm start   # downloads Camoufox on first run (~300MB)
+```
+
+Default port is `9377`. See [Environment Variables](#environment-variables).
 
 > **Note:** the postinstall script unsets `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` for itself before fetching the Camoufox binary. Without that override, an exported `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` (common when Playwright is configured to use system Chrome) would silently skip the binary download and crash the server at runtime.
 >
@@ -121,6 +141,11 @@ Default port is `9377`. See [Environment Variables](#environment-variables) for 
 ### Docker
 
 The included `Makefile` auto-detects your CPU architecture and pre-downloads Camoufox + yt-dlp binaries outside the Docker build, so rebuilds are fast (~30s vs ~3min).
+
+> **The Docker image is the browser server, not the captcha kit.** Challenge solving
+> needs a real X display and `xdotool` to raise the browser window before clicking,
+> which is what `bash turnstile/install.sh` sets up on a VM or bare host. Use Docker
+> if you only want the upstream browser API.
 
 ```bash
 # Build and start (auto-detects arch: aarch64 on M1/M2, x86_64 on Intel)
@@ -193,6 +218,82 @@ Set secrets via the Railway dashboard or CLI:
 ```bash
 railway variables set CAMOFOX_API_KEY="your-generated-key"
 ```
+
+## Captcha solving
+
+A challenge is a different problem from detection. Anti-detection stops you being
+*flagged*; it does not answer a challenge that has already been *issued*. Cloudflare
+in particular will show a Turnstile widget or a Managed Challenge to a perfectly
+clean browser.
+
+This fork answers those, in three layers:
+
+| Layer | What it is | Where it runs |
+| --- | --- | --- |
+| `plugins/captchafix/` | Clicks the widget and waits for the token, or clears a Managed Challenge | **In the server process**, with Playwright |
+| `solver/camofox_solve.rs` | The Rust engine. Std-only, single file, no interpreter | Compiled on install to `camofox_solve_rust` |
+| `extension/` | Chrome MV3 + Firefox MV2 build, for solving in *your* browser | Loaded by you, one click |
+
+### The plugin is what actually clears a challenge
+
+Two things make this possible, and both are in `plugins/captchafix/`:
+
+- `browser.tabs.remote.useCrossOriginOpenerPolicy = false`. Without it the
+  challenge iframe is never created at all, on any site. This is the single
+  essential pref.
+- The click goes **through Playwright**, frame element and all. A page-coordinate
+  click (`POST /tabs/:id/click`) cannot cross into a cross-origin challenge frame;
+  it returns `ok: true` and nothing happens.
+
+That is why the plugin exists rather than just the solver: only code inside the
+browser process can click a cross-origin frame.
+
+### Honest coverage
+
+"All captchas" would be a lie, so here is the measured behaviour:
+
+| Bucket | Captchas | Result |
+| --- | --- | --- |
+| **Clears** | Cloudflare Turnstile, Cloudflare Managed Challenge, FriendlyCaptcha | 4–8 s, verified with a fresh `userId` each run |
+| **Self-solving** | reCAPTCHA v3 (invisible) | answered on its own; the plugin notices within a second |
+| **Reported, not solved** | hCaptcha and reCAPTCHA v2 image grids or sliders, GeeTest, FunCaptcha, AWS WAF, DataDome | the plugin clicks the checkbox, the provider opens a puzzle, and it **says so** |
+
+A puzzle's answer is not in the DOM, so nothing browser-side can produce it.
+When the plugin meets one it returns `result: "none"` with
+`"captcha widget found and clicked, but it needs a human (image grid or slider)"`
+rather than pretending or blind-clicking. That is a property of the captcha, not a
+gap in the code.
+
+A Managed Challenge yields a **`cf_clearance` cookie, not a token**, so the solver
+reports `result: "clearance"` for it. A Turnstile widget yields a token.
+
+### What you get back
+
+```bash
+./camofox_solve_rust "$(printf '%s' '{"url":"https://example.com/login","siteKey":"0x4AAA...","timeoutMs":45000}' | base64 -w0)"
+```
+
+```json
+{"result":"token","captcha":"turnstile","token":"0.abc...","durationMs":6348,"method":"camofox-rust"}
+```
+
+`result` is one of `token`, `clearance`, or `none` (with an `error` explaining why).
+
+### The extension
+
+The extension is for *your* browser: it watches for a widget and asks the solver
+on your box for a token. It is **not** how challenges get cleared inside Camoufox —
+the plugin is.
+
+`install.sh` stages both builds and seeds each one's `config.json` (mode `600`,
+gitignored) with your InstaBox key, so it is already configured the moment it
+loads. Loading an unpacked extension cannot be scripted — that is a browser
+security boundary — so it is the one manual step:
+
+- **Chrome / Edge / Chromium:** `chrome://extensions` → Developer mode → Load unpacked → `turnstile-ext/`
+- **Firefox:** `about:debugging#/runtime/this-firefox` → Load Temporary Add-on → `turnstile-ext-firefox/manifest.json`
+
+A key you type into the popup always wins and survives a re-install.
 
 ## Usage
 
@@ -399,9 +500,14 @@ Without a proxy, Camofox does not claim a geolocation or infer one from the host
 
 ### Telemetry
 
-Browser automation fails in ways that are hard to predict -- Cloudflare challenges, site redesigns breaking selectors, redirect loops, dialog storms, renderer crashes. The scope is wide and the failure modes are diverse. Without telemetry, the only signal is "it didn't work."
+**Off by default, and there is no endpoint to send to.** Upstream ships this on and
+relays to the upstream author's Cloudflare Worker; in a self-hosted fork that would
+mean your box quietly reporting crashes to a third party. So:
 
-Telemetry gives us structured data on *which sites fail*, *how they fail*, and *how often*, so we can prioritize fixes for the patterns that actually affect users. It files GitHub Issues automatically when:
+- `crashReportEnabled` defaults to **false**
+- there is **no default relay URL** — `sendToRelay` returns `false` and sends nothing until you set `CAMOFOX_CRASH_REPORT_URL`
+
+If you do want it, the machinery is unchanged. It files GitHub Issues automatically when:
 
 - **Uncaught exceptions** crash the process
 - **Event loop stalls** exceed 5 seconds (watchdog detection)
@@ -411,40 +517,29 @@ Each report includes the failure type, stack trace, tab health counters (HTTP st
 
 #### How it works
 
-Telemetry is sent to a lightweight Cloudflare Worker endpoint at [`https://camofox-telemetry.askjo.workers.dev`](https://camofox-telemetry.askjo.workers.dev/health). The endpoint holds the GitHub App credentials as environment secrets -- **no secrets are shipped in this package**.
-
 ```
-lib/reporter.js (client, no secrets)
-    |  anonymize -> POST https://camofox-telemetry.askjo.workers.dev/report
+lib/reporter.js (client, no secrets, no default URL)
+    |  anonymize -> POST $CAMOFOX_CRASH_REPORT_URL
     v
-Cloudflare Worker (holds GitHub App key)
+your collector (Cloudflare Worker, or anything that speaks the same JSON)
     |  validate -> rate-limit -> dedup -> create GitHub Issue
     v
 GitHub Issue created
 ```
 
-The endpoint source code is in this repo at [`workers/crash-reporter/index.ts`](workers/crash-reporter/index.ts).
+The relay source is in this repo at [`workers/crash-reporter/index.ts`](workers/crash-reporter/index.ts),
+so you can deploy your own. Nothing is sent anywhere until you do.
 
 #### Verification
 
-You don't have to trust us -- verify what the live endpoint is running:
+The relay exposes its own build identity, so you can check what a deployment is running:
 
 ```bash
-# 1. Ask the endpoint what code it's running
-curl https://camofox-telemetry.askjo.workers.dev/source
+curl https://your-collector.example.com/source
 # -> { "commit": "abc1234", "sha256": "e3b0c44...", "source": "https://github.com/..." }
 
-# 2. Compare the sha256 against the source in this repo
-sha256sum workers/crash-reporter/index.ts
-
-# 3. Check the commit matches what CI deployed
-#    https://github.com/jo-inc/camofox-browser/actions/workflows/telemetry-deploy.yml
-git log --oneline workers/crash-reporter/index.ts | head -1
+sha256sum workers/crash-reporter/index.ts   # compare against the sha256 above
 ```
-
-If the hashes don't match, the endpoint is running different code than what's in the repo. The deploy workflow ([`.github/workflows/telemetry-deploy.yml`](.github/workflows/telemetry-deploy.yml)) injects the commit and source hash at deploy time -- every deploy is auditable in [GitHub Actions](https://github.com/jo-inc/camofox-browser/actions/workflows/telemetry-deploy.yml).
-
-Or skip verification entirely: `CAMOFOX_CRASH_REPORT_ENABLED=false` disables all telemetry, or point to [your own endpoint](#self-hosted-telemetry-endpoint) with `CAMOFOX_CRASH_REPORT_URL`.
 
 #### Privacy
 
@@ -460,10 +555,8 @@ All reported data goes through paranoid anonymization ([`lib/reporter.js` L28-29
 Duplicate issues are detected by stack signature and get a `+1` comment instead of a new issue.
 
 ```bash
-# Disable telemetry
-export CAMOFOX_CRASH_REPORT_ENABLED=false
-
-# Point to your own endpoint (see below)
+# Telemetry is off unless you turn it on AND give it somewhere to send.
+export CAMOFOX_CRASH_REPORT_ENABLED=true
 export CAMOFOX_CRASH_REPORT_URL=https://your-endpoint.example.com/report
 
 # Adjust rate limit (default: 10 per hour)
@@ -472,7 +565,7 @@ export CAMOFOX_CRASH_REPORT_RATE_LIMIT=5
 
 #### Self-hosted telemetry endpoint
 
-To file telemetry reports in your own GitHub repo instead of `jo-inc/camofox-browser`:
+To file telemetry reports in your own GitHub repo:
 
 1. **Create a GitHub App** -- [Settings -> Developer settings -> GitHub Apps -> New](https://github.com/settings/apps/new)
    - Permissions: **Repository -> Issues -> Read & Write**
@@ -666,7 +759,7 @@ Browser behavior can be tuned in `camofox.config.json`:
 | `MAX_TABS_PER_SESSION` | Max tabs per session | `10` |
 | `SESSION_TIMEOUT_MS` | Session inactivity timeout (0 = never) | `600000` (10min) |
 | `BROWSER_IDLE_TIMEOUT_MS` | Kill browser when idle (0 = never) | `300000` (5min) |
-| `CAMOFOX_INTERACTIVE` | Interactive browser mode: `desktop` opens a real local Camoufox window; `off` keeps normal headless behavior | `off` |
+| `CAMOFOX_INTERACTIVE` | Interactive browser mode: `desktop` opens a real local Camoufox window; `off` keeps normal headless behavior. Overrides `interactive.mode` in `camofox.config.json`. | `desktop` (this fork) |
 | `HANDLER_TIMEOUT_MS` | Max time for any handler | `30000` (30s) |
 | `CAMOFOX_SHUTDOWN_TIMEOUT_MS` | Maximum time graceful shutdown waits for persistence checkpoints and browser/session cleanup before forcing exit. Must be a positive integer. | `45000` (45s) |
 | `MAX_CONCURRENT_PER_USER` | Concurrent request cap per user | `3` |
@@ -685,9 +778,9 @@ Browser behavior can be tuned in `camofox.config.json`:
 | `PROXY_COUNTRY` | Target country for proxy geo-targeting | - |
 | `PROXY_STATE` | Target state/region for proxy geo-targeting | - |
 | `TAB_INACTIVITY_MS` | Close tabs idle longer than this | `300000` (5min) |
-| `CAMOFOX_CRASH_REPORT_ENABLED` | Enable anonymized crash/hang telemetry (`false` to disable) | `true` |
-| `CAMOFOX_CRASH_REPORT_URL` | Telemetry endpoint ([self-hosted endpoint](#self-hosted-telemetry-endpoint)) | `https://camofox-telemetry.askjo.workers.dev/report` |
-| `CAMOFOX_CRASH_REPORT_REPO` | GitHub repo for telemetry issues | `jo-inc/camofox-browser` |
+| `CAMOFOX_CRASH_REPORT_ENABLED` | Enable anonymized crash/hang telemetry. Off unless set to `true`. | `false` |
+| `CAMOFOX_CRASH_REPORT_URL` | Telemetry endpoint ([self-hosted endpoint](#self-hosted-telemetry-endpoint)). No default: nothing is sent until this is set. | *(unset)* |
+| `CAMOFOX_CRASH_REPORT_REPO` | GitHub repo for telemetry issues | *(unset)* |
 | `CAMOFOX_CRASH_REPORT_RATE_LIMIT` | Max telemetry reports per hour | `10` |
 | `ENABLE_VNC` | Enable VNC plugin for interactive browser access (`1`) | - |
 | `VNC_PASSWORD` | Password for VNC access (recommended in production) | - |
@@ -711,7 +804,12 @@ Or set the same preference in `camofox.config.json` and restart the server:
 }
 ```
 
-The environment variable overrides the file setting. Set `CAMOFOX_INTERACTIVE=off` to return to normal headless behavior. This mode is intended for a person using the same machine; it does not expose a remote browser-control service.
+**This fork ships `"mode": "desktop"` in the committed config**, because a captcha
+click is a real OS pointer event: the solver raises and sizes the Camoufox window
+before clicking, and a headless window swallows it. If you are not solving
+captchas, `CAMOFOX_INTERACTIVE=off` gives you the headless behavior back — the
+environment variable overrides the file setting. `bash turnstile/doctor.sh` reports
+the mode the running server actually launched with, and fails if it is `off`.
 
 ## Architecture
 
@@ -755,7 +853,7 @@ The Camoufox browser engine (~300MB) is downloaded at `npm install` time by [`ca
 
 ### Telemetry
 
-Anonymized crash/hang telemetry is sent to a Cloudflare Worker endpoint. The endpoint source is [in this repo](workers/crash-reporter/index.ts) and auditable. Verification: `GET /source` on the endpoint returns the deployed commit hash and sha256 so you can compare against the repo. The reporter ([`lib/reporter.js` L28-290](lib/reporter.js#L28-L290)) applies paranoid anonymization: private domains are HMAC-hashed (not reversible), paths are stripped, tokens/IPs/emails are redacted. No page content, cookies, or user data is ever sent. Disable with `CAMOFOX_CRASH_REPORT_ENABLED=false` or point to your own endpoint with `CAMOFOX_CRASH_REPORT_URL`.
+Anonymized crash/hang telemetry is **off by default and has no default endpoint**: this fork removed the hardcoded upstream Worker so a self-hosted box cannot report to a third party. The collector source is [in this repo](workers/crash-reporter/index.ts) and auditable; `GET /source` returns the deployed commit hash and sha256 so you can compare against the repo. To use it, set `CAMOFOX_CRASH_REPORT_ENABLED=true` **and** `CAMOFOX_CRASH_REPORT_URL` to your own collector. The reporter ([`lib/reporter.js` L28-290](lib/reporter.js#L28-L290)) applies paranoid anonymization: private domains are HMAC-hashed (not reversible), paths are stripped, tokens/IPs/emails are redacted. No page content, cookies, or user data is ever sent.
 
 ### Session persistence
 
@@ -763,32 +861,31 @@ The persistence plugin saves cookies and localStorage to `~/.camofox/profiles/<h
 
 ### Network access
 
-Outbound connections are made to: (1) URLs the agent navigates to (core functionality), (2) the telemetry endpoint (anonymized, opt-out available). Inbound: the REST API on port 9377, bound to all interfaces by default or to `CAMOFOX_BIND_HOST` when configured, optionally protected by `CAMOFOX_ACCESS_KEY`.
+Outbound connections are made to: (1) URLs the agent navigates to (core functionality), (2) the telemetry endpoint — but only if you configure one, since this fork has no default. Inbound: the REST API on port 9377, bound to all interfaces by default or to `CAMOFOX_BIND_HOST` when configured, optionally protected by `CAMOFOX_ACCESS_KEY`. `turnstile/install.sh` binds it to `127.0.0.1`.
 
 ### Subprocess usage
 
-Two subprocesses may be spawned: (1) the Camoufox browser engine (core functionality, `lib/launcher.js`), (2) yt-dlp for YouTube transcript extraction (optional, `plugins/youtube/youtube.js`). Both are isolated in dedicated files separate from route handlers.
+Three subprocesses may be spawned: (1) the Camoufox browser engine (core functionality, `lib/launcher.js`), (2) yt-dlp for YouTube transcript extraction (optional, `plugins/youtube/youtube.js`), (3) `xdotool` and the compiled solver binary, which the captchafix plugin execs to raise the browser window and click a challenge. All are isolated in dedicated files separate from route handlers.
 
 ## Testing
 
 ```bash
-npm test              # all tests
-npm run test:e2e      # e2e tests only
-npm run test:live     # live site tests (Google, macros)
-npm run test:debug    # with server output
-```
+npm test                  # all tests
+npm run test:plugins      # plugin tests
+npm run test:e2e          # e2e tests only
+npm run test:live         # live site tests (Google, macros)
+npm run test:debug        # with server output
 
-## npm
-
-```bash
-npm install @askjo/camofox-browser
+bash turnstile/doctor.sh  # is this host actually able to solve?
 ```
 
 ## Credits
 
 - [Camoufox](https://camoufox.com) - Firefox-based browser with C++ anti-detection
 - [Donate to Camoufox's original creator daijro](https://camoufox.com/about/)
+- [camofox-browser](https://github.com/jo-inc/camofox-browser) - the upstream server this fork is built on
 - [OpenClaw](https://openclaw.ai) - Open-source AI agent framework
+- [germondai/trawl](https://github.com/germondai/trawl) and [cfsolve](https://github.com/chris124567/cfsolve) - reference implementations for the solver. Neither is vendored; the solver here is original, MIT-licensed code.
 
 ## Crypto Scam Warning
 

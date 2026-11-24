@@ -247,16 +247,16 @@ Camofox has two front doors: the HTTP API and the agent tool interface (an MCP s
 
 ## Telemetry
 
-**No credentials are embedded in this package.** `lib/reporter.js` is a stateless HTTP client that sends anonymized crash/hang telemetry to a Cloudflare Worker endpoint (`camofox-telemetry.askjo.workers.dev`). The endpoint holds the GitHub App credentials as environment secrets -- see `workers/crash-reporter/index.ts`. The source is in-repo and auditable.
+**No credentials are embedded in this package, and there is no default endpoint.** `lib/reporter.js` is a stateless HTTP client that POSTs anonymized crash/hang telemetry to `CAMOFOX_CRASH_REPORT_URL`. Upstream hardcoded the upstream author's Worker there; this fork removed it, so an unconfigured install sends nothing at all. The collector holds the GitHub App credentials as environment secrets -- see `workers/crash-reporter/index.ts`. The source is in-repo and auditable.
 
-- **Architecture**: `lib/reporter.js` (client, no secrets, no `fs`) -> POST -> Cloudflare Worker endpoint -> GitHub Issues
-- **`lib/reporter.js`** has ZERO credentials, ZERO private keys, ZERO `fs` imports. It only does `fetch()` to the telemetry endpoint.
+- **Architecture**: `lib/reporter.js` (client, no secrets, no `fs`) -> POST `$CAMOFOX_CRASH_REPORT_URL` -> your collector -> GitHub Issues
+- **`lib/reporter.js`** has ZERO credentials, ZERO private keys, ZERO `fs` imports. It only does `fetch()` to the configured endpoint.
 - **`lib/resources.js`** handles `fs`-based resource snapshots (reading /proc on Linux) -- separated from reporter.js so no file-read + network-send pattern exists in any single file. No `child_process` import.
 - **Anonymization** is in `lib/reporter.js` L28-290 -- text scrubbing (`anonymize()`), URL anonymization (`createUrlAnonymizer()`), and tab health tracking (`createTabHealthTracker()`)
 - **Public domain list** (~120 entries) determines which domains are shown verbatim vs HMAC-hashed
-- **Tests**: `tests/unit/crashRelay.test.js` (telemetry client), `tests/unit/crashRelayWorker.test.js` (worker contract), `tests/unit/noSecrets.test.js` (asserts no key material in shipped files)
+- **Tests**: `tests/unit/crashRelay.test.js` (telemetry client, including "sends nothing without a URL"), `tests/unit/crashRelayWorker.test.js` (worker contract), `tests/unit/noSecrets.test.js` (asserts no key material in shipped files)
 - Self-hosted endpoint: see README "Self-hosted telemetry endpoint" section
-- Disable with `CAMOFOX_CRASH_REPORT_ENABLED=false`
+- Enabled only with `CAMOFOX_CRASH_REPORT_ENABLED=true` **and** a `CAMOFOX_CRASH_REPORT_URL`
 
 ## Code Separation Conventions
 

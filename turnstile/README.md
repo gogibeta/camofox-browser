@@ -107,10 +107,17 @@ bash turnstile/doctor.sh
 
 It checks the things that have each, at some point, been missing while the
 server still looked healthy: `Xvfb`, `xdotool`, the solver (by running it), a
-captchafix-enabled config, both extension manifests at the right version, the
-seeded extension config, `yt-dlp`, `/health`, and whether `captchafix` actually
-logged a load. It ends with `RESULT: ready` and exits 0, or lists the problems
-and exits 1.
+captchafix-enabled config, the `interactive.mode` the server actually launched
+with (read back from its own log), both extension manifests at the right version,
+the seeded extension config, `yt-dlp`, `/health`, and whether `captchafix`
+actually logged a load. It ends with `RESULT: ready` and exits 0, or lists the
+problems and exits 1.
+
+The launch-mode check exists because `camofox.config.json` is **tracked**: the
+installer merges `desktop` in, but a plain `git pull` or `git reset --hard`
+restores whatever is committed. The committed value is `desktop` now, and doctor
+still reads the mode the running process launched with rather than trusting the
+file, because a headless window silently swallows a challenge click.
 
 ## Solve from the command line
 
@@ -364,34 +371,38 @@ Every Cloudflare row was measured with a **fresh `userId`** per run, so no
 persisted cookie could make a pass look real. The two puzzle rows are expected
 outcomes, not regressions: those demo widgets challenge every visitor.
 
-Last full run against the committed code:
+Last full run against the committed code (solver 7 cases, plugin 7 targets):
 
 ```
-nodaroo (plugin)      cleared 6.8 s
-glassdoor (plugin)    cleared 7.8 s
-solvegate (plugin)    answered 3.6 s
-100milionseek         answered 4.8 s
-hCaptcha (plugin)     clicked, then puzzle, reported 6.3 s
-reCAPTCHA v2 (plugin) clicked, then puzzle, reported 2.1 s
-friendlycaptcha       answered 7.3 s, 1 click
-nodaroo (solver)      clearance, 6.2 s, captcha=cf-managed
-glassdoor (solver)    clearance, 7.0 s, captcha=cf-managed
-solvegate (solver)    token, 645 chars, 6.1 s, captcha=turnstile
-100milionseek         token, 666 chars, 9.0 s, captcha=turnstile
-friendlycaptcha       token, 6421 chars, 12.8 s, captcha=friendlycaptcha
-hCaptcha (solver)     no token, reported at 28 s
-reCAPTCHA v2 (solver) no token, reported at 27 s
+nodaroo (solver)       clearance, 6.6 s, captcha=cf-managed
+glassdoor (solver)     clearance, 8.0 s, captcha=cf-managed
+solvegate (solver)     token, 645 chars, 6.3 s, captcha=turnstile
+100milionseek (solver) token, 666 chars, 6.6 s, captcha=turnstile
+friendlycaptcha        token, 6421 chars, 15.8 s, captcha=friendlycaptcha
+hCaptcha (solver)      no token, reported "needs a human" at 27.5 s
+reCAPTCHA v2 (solver)  no token, reported "needs a human" at 27.2 s
+100milionseek (plugin) SOLVED    cf-turnstile-response:666
+nodaroo (plugin)       ANSWERED  challenge cleared
+glassdoor (plugin)     ANSWERED  challenge cleared
+solvegate (plugin)     SOLVED    cf-turnstile-response:645
+hCaptcha (plugin)      PUZZLE    clicked, then puzzle
+reCAPTCHA v2 (plugin)  PUZZLE    clicked, then puzzle
+friendlycaptcha (plugin) SOLVED  frc-captcha-response:6421
 ```
 
 Fresh-install measurement on a wiped VM: **5/5 on solvegate at 8.1–8.4 s**.
 
 Extension end to end, MV3 loaded unpacked in a headed Chromium, against the
-committed extension:
+committed extension, with a freshly seeded `config.json` and no manual popup work:
 
 ```
-100milionseek  OK 14.3 s   browser-up 0.5s, page-loaded 2.1s, answered 14.3s
-solvegate      OK 10.0 s   browser-up 0.5s, page-loaded 0.9s, answered 10.0s
+100milionseek  OK  9.2 s   RESULT real OK, TOKEN_LEN 645
+solvegate      OK 11.7 s   RESULT second OK, TOKEN_LEN 666
 ```
+
+The popup was also checked in the same browser: it shows the seeded key
+(`KEY_LEN 56`), the machine id, the solver path and an empty interpreter, and
+clicking Save with the fields untouched keeps all of them.
 
 `vm_ext_test.py` prints that `TIMELINE`, so a slow run can be attributed instead
 of guessed at. The first run against a cold box once took 42 s; it was the VM
@@ -444,6 +455,14 @@ InstaBox key, machine id, API URL and solver path, and the worker seeds its
 storage from it. A key you type into the popup always wins and is never
 overwritten by a re-install. If no key was available at install time, the file is
 removed rather than left stale, and the popup asks for one.
+
+The popup reads the same bundled config the worker does, so on a configured
+install it shows the real key instead of an empty field — it used to read storage
+only, which made a working install look unconfigured and sent people to retype a
+value that was already right. Saving with a field left blank now means "leave it
+as it was", not "erase it", and every value is CR-stripped on both sides: a
+trailing `\r` on the machine id made `fetch()` reject the URL while the popup
+still looked configured.
 
 That config is read with `fetch()` on the extension's own origin, so it needs no
 `web_accessible_resources` entry and is not reachable from a page.
