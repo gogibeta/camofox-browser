@@ -251,14 +251,20 @@ echo "    firefox:  $FIREFOX_EXT"
 # is worse than no file, because it looks configured.
 if [ -n "${INSTABOX_API_KEY:-}" ]; then
   EXT_CFG=$(node -e '
+    // Strip CR and surrounding whitespace from every value. A .env written on
+    // Windows, or an env var passed through a shell that preserved a CR, gives
+    // you "m_abc\r" -- and a machine id with a trailing CR produces a URL that
+    // fetch() rejects, so the extension fails to reach the box at all while
+    // looking perfectly configured.
+    const clean = (v) => String(v == null ? "" : v).replace(/[\r\n]/g, "").trim();
     const cfg = {
-      instaboxApiKey: process.env.INSTABOX_API_KEY,
-      instaboxMachineId: process.env.INSTABOX_MACHINE_ID || "",
-      instaboxApiUrl: process.env.INSTABOX_API_URL || "https://api.instabox.sh/v1",
+      instaboxApiKey: clean(process.env.INSTABOX_API_KEY),
+      instaboxMachineId: clean(process.env.INSTABOX_MACHINE_ID),
+      instaboxApiUrl: clean(process.env.INSTABOX_API_URL) || "https://api.instabox.sh/v1",
       solverPath: process.argv[1],
       solverPython: "",
-      camofoxUrl: `http://127.0.0.1:${process.env.CAMOFOX_PORT || 9377}`,
-      timeoutMs: Number(process.env.TIMEOUT_MS || 45000),
+      camofoxUrl: `http://127.0.0.1:${clean(process.env.CAMOFOX_PORT) || 9377}`,
+      timeoutMs: Number(clean(process.env.TIMEOUT_MS)) || 45000,
       autoSolve: true,
     };
     process.stdout.write(JSON.stringify(cfg, null, 2));

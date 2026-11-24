@@ -49,3 +49,9 @@ playwright-report/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# The installer writes extension/config.json with the InstaBox key so a freshly
+# loaded extension is already configured. It is a secret: never commit it.
+extension/config.json
+turnstile-ext/config.json
+turnstile-ext-firefox/config.json

@@ -13,11 +13,13 @@ pretending. The table below is the real behaviour, measured.
 
 | Path | What it is |
 | --- | --- |
-| `turnstile/install.sh` | One-shot installer: deps, config, plugins, solver, headed server |
+| `turnstile/install.sh` | **The** installer. Installs everything, in one command. |
+| `turnstile/doctor.sh` | Reports what a solve silently depends on. Run it any time. |
 | `solver/camofox_solve.rs` | The solver: std-only Rust, compiled on install |
 | `solver/camofox_solve.py` | Same solver in Python, kept as a readable reference (not installed) |
 | `plugins/captchafix/` | Makes Cloudflare challenges solvable at all, and clears them in-process |
 | `extension/` | Chrome MV3 + Firefox MV2 auto-solve extension |
+| `scripts/merge-camofox-config.mjs` | Config merge shared by every install path |
 | `turnstile/deploy_instabox.py` | Upload the kit to an InstaBox VM over its exec API |
 | `turnstile/vm_ext_test.py` | End-to-end extension test in a headed browser |
 
@@ -29,18 +31,55 @@ cd camofox-browser
 bash turnstile/install.sh
 ```
 
-That single command installs node deps, writes `camofox.config.json`, checks the
-`captchafix` plugin is present, stages the extension into `/data/workspace`,
-compiles the Rust solver (failing loudly if `rustc` is missing), and starts a
-headed browser on `DISPLAY=:1` bound to `127.0.0.1:9377`. It then waits for
-`HEALTH OK` **and** verifies the plugin actually loaded, because a healthy
-server without it still cannot clear a challenge.
+That one command does all of this, with no manual follow-up:
 
-`turnstile/vm_setup_camofox.sh` does the same thing from a VM that already has
-the old stack, and clones **this fork** (override with `CAMOFOX_REPO_URL` /
-`CAMOFOX_REPO_BRANCH`). It fails loudly if the checkout has no
-`solver/camofox_solve.rs` or `extension/`, because a browser without the kit
-cannot auto-solve.
+1. checks `node`/`npm`/`git`/`curl`, and the Node major version
+2. installs `xvfb` and `xdotool` (the display, and the OS window activation the
+   solver needs before it clicks)
+3. installs a Rust toolchain if there is none — distro package first, rustup as
+   a fallback
+4. runs `npm ci`
+5. **merges** `camofox.config.json` (see below) rather than overwriting it
+6. installs every enabled plugin's `apt.txt` and `post-install.sh` — this is what
+   puts the YouTube plugin's pinned `yt-dlp` on the box
+7. verifies `plugins/captchafix/index.js` exists and parses, and removes the
+   superseded `ipv4fix` / `cloudflarefix` plugins
+8. stages **both** extension builds (`turnstile-ext` for Chrome MV3,
+   `turnstile-ext-firefox` for the MV2 manifest), seeds the InstaBox key from
+   the environment into `config.json`, and compiles + smoke-tests the Rust solver
+9. starts a headed server on `127.0.0.1:9377`, then waits for `HEALTH OK` **and**
+   proves `captchafix` actually loaded — a healthy server without it clears
+   nothing
+10. runs `turnstile/doctor.sh` and exits non-zero if anything is still missing
+
+Flags: `--no-start` (install only), `--no-deps` (skip apt), `--no-rust` (never
+bootstrap a toolchain, fail if `rustc` is absent).
+
+### The config is merged, not replaced
+
+Every installer used to `cat >` a fixed `camofox.config.json` over the real one.
+That is how a live box lost the `vnc` plugin and had `interactive.mode` reset
+from `desktop` to `off` by a re-deploy: the written file was a snapshot of what
+one install wanted, not a merge into what was already configured.
+
+`install.sh` calls `scripts/merge-camofox-config.mjs`, which:
+
+- promotes the `["youtube","persistence"]` array form to the object form
+- adds captchafix, and drops `ipv4fix` / `cloudflarefix`
+- **preserves an explicitly disabled plugin** — `vnc: {enabled: false}` stays off
+- keeps per-plugin settings such as `vnc.resolution` and `persistence.profileDir`
+- backs up a config it cannot parse to `camofox.config.json.invalid-<ts>` instead
+  of discarding it
+
+### Two other entry points, both thin
+
+`turnstile/vm_setup_camofox.sh` (used by the Apify kit) and
+`turnstile/deploy_instabox.py` deliberately do almost nothing themselves. They
+get the right checkout onto the box and then `exec` the checkout's own
+`install.sh`. They used to re-implement it line for line, and the copies drifted:
+the Apify path registered the plugin into `/data/home/camofox-browser`, a
+directory the real checkout never uses, so it reported success while the live
+server on `/data/workspace` ran with no captchafix at all.
 
 Install only, without starting the server:
 
@@ -48,8 +87,10 @@ Install only, without starting the server:
 bash turnstile/install.sh --no-start
 ```
 
-Re-running is safe; it is idempotent, and it recompiles the solver so a re-install
-never keeps an old binary running.
+Re-running is safe and fast: `apt` is only asked for packages that are missing,
+the plugin hooks are idempotent (a pinned `yt-dlp` is checksum-verified, not
+re-downloaded), and the solver is recompiled so an old binary never keeps
+running.
 
 If `turnstile/install.sh` is run from a checkout that is not at
 `/data/workspace/camofox-browser`, set `WS` and `REPO`:
@@ -57,6 +98,19 @@ If `turnstile/install.sh` is run from a checkout that is not at
 ```bash
 WS=/data/workspace REPO=$PWD bash turnstile/install.sh
 ```
+
+### Is it ready?
+
+```bash
+bash turnstile/doctor.sh
+```
+
+It checks the things that have each, at some point, been missing while the
+server still looked healthy: `Xvfb`, `xdotool`, the solver (by running it), a
+captchafix-enabled config, both extension manifests at the right version, the
+seeded extension config, `yt-dlp`, `/health`, and whether `captchafix` actually
+logged a load. It ends with `RESULT: ready` and exits 0, or lists the problems
+and exits 1.
 
 ## Solve from the command line
 
@@ -371,14 +425,35 @@ a page bug; no solver can fix a page that never renders a widget.
 
 ## Extension
 
+Neither browser can have an unpacked extension installed for it — that is a
+browser security boundary, so it is the one genuinely manual step. Everything
+*around* it is automated: `install.sh` stages the build and seeds its config, so
+loading it is the last thing you do.
+
 Chrome / Edge / Chromium (MV3): `chrome://extensions` → Developer mode → Load
-unpacked → select `extension/`.
+unpacked → select `/data/workspace/turnstile-ext`.
 
 Firefox / Camoufox (MV2): `about:debugging#/runtime/this-firefox` → Load
-Temporary Add-on → select `extension/manifest-firefox.json`.
+Temporary Add-on → select `/data/workspace/turnstile-ext-firefox`
+(`manifest-firefox.json` has already been renamed to `manifest.json` there, so
+the directory is a valid add-on).
 
-Open the popup, confirm the backend is `instabox`, and paste your InstaBox API
-key. The key lives in extension storage and is never in the source.
+The extension is already configured on first load. `install.sh` writes
+`config.json` next to `background.js` (mode `600`, gitignored) containing the
+InstaBox key, machine id, API URL and solver path, and the worker seeds its
+storage from it. A key you type into the popup always wins and is never
+overwritten by a re-install. If no key was available at install time, the file is
+removed rather than left stale, and the popup asks for one.
+
+That config is read with `fetch()` on the extension's own origin, so it needs no
+`web_accessible_resources` entry and is not reachable from a page.
+
+**Camoufox itself does not load this extension**, and cannot be made to: an
+extension in `about:addons` is not what clears a challenge here. The thing that
+clears challenges inside Camoufox is the *plugin*, which runs in the server
+process with Playwright and can click inside a cross-origin challenge frame — see
+`docs/managed-challenge.md`. The extension is for *your* browser, driving the
+solver on your box.
 
 Verify end to end on the VM:
 

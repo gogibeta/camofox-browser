@@ -43,7 +43,7 @@ async function seedStorage() {
   const seed = { ...DEFAULTS };
   for (const [key, value] of Object.entries(bundled)) {
     if (value === null || value === undefined || value === '') continue;
-    seed[key] = value;
+    seed[key] = typeof value === 'string' ? cleanValue(value) : value;
   }
   // Never clobber a value the user already set in the popup. onInstalled fires
   // again on update, and re-seeding would silently discard a hand-entered key.
@@ -161,6 +161,19 @@ async function solveOnInstabox(info, cfg) {
   };
 }
 
+/**
+ * Strip CR/newlines and surrounding whitespace from a config value.
+ *
+ * A `.env` authored on Windows, or a value that travelled through a shell that
+ * kept the CR, arrives as "m_abc\r". A machine id with a trailing CR builds a
+ * URL that fetch() rejects, so the extension fails to reach the box at all while
+ * looking perfectly configured in the popup.
+ */
+function cleanValue(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).replace(/[\r\n]/g, '').trim();
+}
+
 /** Effective config: DEFAULTS, overlaid with the bundled file, then the user's. */
 async function loadConfig() {
   const bundled = await bundledConfig();
@@ -172,6 +185,9 @@ async function loadConfig() {
   // A value the user actually typed always wins over the bundled default.
   for (const [key, value] of Object.entries(stored)) {
     if (value !== null && value !== undefined && value !== '') merged[key] = value;
+  }
+  for (const key of Object.keys(merged)) {
+    if (typeof merged[key] === 'string') merged[key] = cleanValue(merged[key]);
   }
   return merged;
 }
