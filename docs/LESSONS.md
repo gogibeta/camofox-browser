@@ -43,6 +43,11 @@ history; add a new line if a rule changes.
 - `xdotool` missing is silent -> the solver raises and sizes the
   Camoufox window before clicking, because a background window swallows the OS
   pointer event. `plugins/captchafix/apt.txt` declares it.
+- A tracked file's value is not the value in use -> `camofox.config.json` is
+  tracked, so `git reset --hard` restores whatever is committed. The installer's
+  merge is undone by the next pull unless the committed value is also right.
+  Ship `interactive.mode: desktop`, and have doctor read the mode back from the
+  server's own launch log rather than trusting the file.
 - A plugin enabled but its dep absent (`yt-dlp`) -> the plugin loads and
   degrades silently. `scripts/install-plugin-deps.sh` must run on the VM, not
   only in Docker.
