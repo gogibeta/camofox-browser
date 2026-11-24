@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
-"""Deploy the no-Apify Turnstile kit to the InstaBox VM.
+"""Deploy the no-Apify Turnstile kit to an InstaBox VM.
 
-Reads keys from ../.env (never prints them). Uploads the extension, the
-camofox-browser based solver, and the setup script, then runs the setup which
-stops the old camoufox-server.py stack and starts our camofox-browser server.
+There is exactly ONE installer: `turnstile/install.sh` in this repo. This script
+does not duplicate it. It uploads the extension config (which carries your
+InstaBox key, so it cannot live in git), uploads the thin bootstrap that gets
+the checkout onto the box, and then runs the checkout's own installer.
+
+Earlier versions uploaded the extension, the solver source, compiles and a
+second setup script from here. That duplicated install.sh line for line, and the
+two copies drifted: this path wrote config with its own heredoc, so a `vnc`
+plugin the operator had enabled was silently deleted by a re-deploy, and
+`interactive.mode` reset from "desktop" to "off".
 
 Usage:
   python turnstile/deploy_instabox.py
-  python turnstile/deploy_instabox.py --skip-server   # only upload files
+  python turnstile/deploy_instabox.py --upload-only   # upload, do not install
 """
 from __future__ import annotations
 
 import argparse
 import base64
-import io
 import json
 import os
-import sys
-import tarfile
 import time
 import urllib.error
 import urllib.request
@@ -75,26 +79,10 @@ def upload_bytes(machine: str, key: str, api: str, data: bytes, path: str) -> No
         raise RuntimeError(f"Upload failed for {path}: {result.get('stderr', '')[:300]}")
 
 
-def upload_dir(machine: str, key: str, api: str, src: Path, path: str) -> None:
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for item in sorted(src.iterdir()):
-            if item.is_file():
-                tar.add(item, arcname=item.name)
-    upload_bytes(machine, key, api, buf.getvalue(), "/tmp/turnstile-ext.tar.gz")
-    exec_cmd(machine, key, api, f"rm -rf {path} && mkdir -p {path}")
-    result = exec_cmd(
-        machine, key, api,
-        f"tar -xzf /tmp/turnstile-ext.tar.gz -C {path} && ls {path}",
-    )
-    if result.get("exitCode") not in (0, None):
-        raise RuntimeError(f"Extract failed for {path}: {result.get('stderr', '')[:300]}")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--skip-server", action="store_true",
-                        help="Upload files only; do not restart camofox-browser")
+    parser.add_argument("--upload-only", action="store_true",
+                        help="Upload the config and bootstrap; do not install")
     args = parser.parse_args()
 
     load_env()
@@ -103,47 +91,10 @@ def main() -> None:
     api = os.environ.get("INSTABOX_API_URL", "https://api.instabox.sh/v1").rstrip("/")
 
     print(f"Target VM: {machine}")
-    print("Uploading extension + solver ...")
+    print("Uploading extension config + bootstrap ...")
 
-    upload_dir(machine, key, api, ROOT / "extension", f"{REMOTE}/turnstile-ext")
-    # One engine: the Rust binary. It has to be built on the VM (no link.exe on
-    # Windows, and the glibc has to match), so the source is uploaded and
-    # compiled here. The Python solver stays in the repo as a reference and is
-    # never uploaded - leaving it on the VM only invites a second, stale path.
-    upload_bytes(
-        machine, key, api,
-        (ROOT / "solver" / "camofox_solve.rs").read_bytes(),
-        f"{REMOTE}/camofox_solve.rs",
-    )
-    # These live in turnstile/, next to this script. An earlier layout had them
-    # in a scripts/ directory that no longer exists.
-    upload_bytes(
-        machine, key, api,
-        (ROOT / "turnstile" / "vm_setup_camofox.sh").read_bytes(),
-        f"{REMOTE}/vm_setup_camofox.sh",
-    )
-    upload_bytes(
-        machine, key, api,
-        (ROOT / "turnstile" / "vm_ext_test.py").read_bytes(),
-        f"{REMOTE}/vm_ext_test.py",
-    )
-
-    build = exec_cmd(
-        machine, key, api,
-        f"cd {REMOTE} && rustc --edition 2021 -O camofox_solve.rs -o camofox_solve_rust "
-        f"&& chmod +x camofox_solve_rust && echo BUILD_OK",
-        timeout=600,
-    )
-    if "BUILD_OK" not in (build.get("stdout") or ""):
-        safe_print("Rust build failed: "
-                   + ((build.get("stdout") or "") + (build.get("stderr") or ""))[-400:])
-        raise SystemExit("the Rust solver did not compile; aborting deploy")
-    # A stale Python solver from an earlier install is removed here rather than
-    # left for someone to point solverPath at.
-    exec_cmd(machine, key, api,
-             f"rm -f {REMOTE}/camofox_solve.py {REMOTE}/instabox_solver.py")
-    safe_print("Rust solver: built")
-
+    # The extension reads this from beside its own files. Written here rather
+    # than committed because it carries the InstaBox key.
     config = {
         "instaboxApiKey": key,
         "instaboxMachineId": machine,
@@ -154,20 +105,26 @@ def main() -> None:
         "timeoutMs": int(os.environ.get("TIMEOUT_MS") or 45000),
         "autoSolve": True,
     }
-    upload_bytes(
-        machine, key, api,
-        json.dumps(config).encode(),
-        f"{REMOTE}/ext-config.json",
-    )
-    print("Files uploaded.")
+    upload_bytes(machine, key, api, json.dumps(config).encode(), f"{REMOTE}/ext-config.json")
+    exec_cmd(machine, key, api, f"chmod 600 {REMOTE}/ext-config.json")
 
-    if args.skip_server:
+    bootstrap = ROOT / "turnstile" / "vm_setup_camofox.sh"
+    if not bootstrap.exists():
+        raise SystemExit(f"{bootstrap} is missing from the checkout")
+    upload_bytes(machine, key, api, bootstrap.read_bytes(), f"{REMOTE}/vm_setup_camofox.sh")
+    safe_print("Bootstrap: vm_setup_camofox.sh")
+
+    if args.upload_only:
+        print("Uploaded. Install with:")
+        print(f"  bash {REMOTE}/vm_setup_camofox.sh")
         return
 
-    print("Replacing old Camoufox stack with camofox-browser (this takes a few minutes) ...")
+    print("Cloning the fork and running its installer (this takes a few minutes) ...")
     exec_cmd(
         machine, key, api,
         f"chmod +x {REMOTE}/vm_setup_camofox.sh && "
+        f"rm -f {REMOTE}/camofox-setup.log && "
+        f"INSTABOX_API_KEY={key} INSTABOX_MACHINE_ID={machine} INSTABOX_API_URL={api} "
         f"nohup bash {REMOTE}/vm_setup_camofox.sh > {REMOTE}/camofox-setup.log 2>&1 & echo started",
         timeout=30,
     )
@@ -182,17 +139,17 @@ def main() -> None:
             timeout=30,
         )
         out = (result.get("stdout") or "").strip()
-        if "HEALTH OK" in out:
+        if "RESULT: ready" in out:
             break
-        if "HEALTH FAILED" in out:
+        if "HEALTH FAILED" in out or "ERROR:" in out:
             break
         if "SETUP_DONE" in out and "STILL_RUNNING" not in out:
             break
         print("  ... still working")
 
     safe_print(out[-6000:] if out else "(no setup output)")
-    if "HEALTH OK" not in out:
-        raise SystemExit("camofox-browser health check did not pass")
+    if "RESULT: ready" not in out:
+        raise SystemExit("install did not finish in a ready state; see the log above")
     print("Deploy OK.")
 
 

@@ -1,0 +1,5 @@
+# The Rust solver raises and resizes the Camoufox window before it clicks,
+# because a Managed Challenge click is delivered as a real OS pointer event and a
+# background window can swallow it. Without xdotool the solve still "runs" and
+# quietly misses the widget, which is worse than failing loudly.
+xdotool

@@ -15,9 +15,49 @@ const DEFAULTS = {
   autoSolve: true,
 };
 
+/**
+ * Optional bundled config, written next to this file by the installer.
+ *
+ * Loading an unpacked extension into Chrome cannot be scripted -- that is a
+ * browser security boundary, not a missing feature -- but *configuring* it can
+ * be. The installer drops a `config.json` (mode 600, never in git) holding the
+ * InstaBox key and machine id it just provisioned, so the extension is usable
+ * the moment it is loaded instead of asking the user to paste a key into the
+ * popup. Absent file, or unreadable, is normal: DEFAULTS then stand.
+ */
+async function bundledConfig() {
+  try {
+    const url = api.runtime.getURL('config.json');
+    const response = await fetch(url);
+    if (!response.ok) return {};
+    const parsed = await response.json();
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+/** Seed storage once, on install, from DEFAULTS overlaid with the bundled file. */
+async function seedStorage() {
+  const bundled = await bundledConfig();
+  const seed = { ...DEFAULTS };
+  for (const [key, value] of Object.entries(bundled)) {
+    if (value === null || value === undefined || value === '') continue;
+    seed[key] = value;
+  }
+  // Never clobber a value the user already set in the popup. onInstalled fires
+  // again on update, and re-seeding would silently discard a hand-entered key.
+  const existing = await api.storage.local.get(seed);
+  const merged = { ...seed, ...existing };
+  await api.storage.local.set(merged);
+  return merged;
+}
+
 api.runtime.onInstalled.addListener(async () => {
-  await api.storage.local.set(DEFAULTS);
-  try { api.action?.setBadgeBackgroundColor?.({ color: '#1a73e8' }); } catch (_) {}
+  try {
+    await seedStorage();
+    api.action?.setBadgeBackgroundColor?.({ color: '#1a73e8' });
+  } catch (_) {}
 });
 
 const busyTabs = new Set();
@@ -121,6 +161,21 @@ async function solveOnInstabox(info, cfg) {
   };
 }
 
+/** Effective config: DEFAULTS, overlaid with the bundled file, then the user's. */
+async function loadConfig() {
+  const bundled = await bundledConfig();
+  const stored = await api.storage.local.get(DEFAULTS);
+  const merged = { ...DEFAULTS };
+  for (const [key, value] of Object.entries(bundled)) {
+    if (value !== null && value !== undefined && value !== '') merged[key] = value;
+  }
+  // A value the user actually typed always wins over the bundled default.
+  for (const [key, value] of Object.entries(stored)) {
+    if (value !== null && value !== undefined && value !== '') merged[key] = value;
+  }
+  return merged;
+}
+
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
 
@@ -133,7 +188,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (tabId != null) busyTabs.add(tabId);
     if (tabId != null) setBadge(tabId, '...', '#f9ab00');
 
-    api.storage.local.get(DEFAULTS)
+    loadConfig()
       .then((cfg) => solveOnInstabox(msg.info || {}, cfg))
       .then((res) => {
         if (tabId != null) setBadge(tabId, res.ok ? 'OK' : 'ERR', res.ok ? '#1e8e3e' : '#d93025');
