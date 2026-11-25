@@ -75,3 +75,25 @@ history; add a new line if a rule changes.
   from the page. Verify through the DOM field or the extension's own message.
 - Apify kit's `extension/` drifted 143 lines from the fork -> keep it
   byte-identical; two copies of a solver solve differently.
+
+## Local Windows install (MCP host)
+
+- `npm ci` fails on this box with two unrelated errors -> `openclaw`
+  (devDependency only, never imported by runtime code) demands Node >=24 and
+  `better-sqlite3` tries a node-gyp build because its GitHub prebuild asset
+  for node-v127-win32-x64 404s. Fix: `npm ci --omit=dev --ignore-scripts`
+  then `node postinstall.js`. better-sqlite3's own tarball ships all
+  prebuilds, so requiring it still works without a compiler.
+- `Start-Process` in PowerShell 5.1 has no `-Environment` parameter ->
+  set `` in the parent first and let the child inherit.
+- Launching `node server.js` through a shell tool ties the server's life to
+  the tool timeout (it died at 1800 s) -> use `Start-Process -WindowStyle
+  Hidden` with redirects so it outlives the session.
+- `camofox_actionables` silently omits content links (72 snapshot refs vs 12
+  actionables on a Wikipedia results page) -> it is a form/toolbar filter, not
+  an index. Never conclude "no links" from it.
+- `camofox_mouse_wheel` and `camofox_scroll` return `{ok:true}` while
+  `window.scrollY` stays 0 on short/virtualised pages -> verify the scroll
+  actually moved, then fall back to `evaluate` + `window.scrollTo`.
+- Google search triggers `/sorry` reCAPTCHA even on a clean Camoufox ->
+  do not use Google as a smoke test; use Wikipedia or example.com.
